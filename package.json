@@ -1,0 +1,22 @@
+{
+  "name": "koishi-plugin-group-verification",
+  "description": "Koishi 群组加群验证插件，支持多关键词匹配审核、黑名单过滤和详细统计功能",
+  "version": "0.0.1",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "license": "MIT",
+  "scripts": {},
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "devDependencies": {},
+  "peerDependencies": {
+    "koishi": "^4.18.7"
+  }
+}
