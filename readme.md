@@ -101,6 +101,32 @@ group-verify.stats 123456789
 group-verify.stats total
 ```
 
+### 黑名单命令
+```
+# 添加黑名单条目（可指定原因和群号）
+group-verify.blacklist a <用户ID> [原因] [群号]
+# 别名：gvb, gv.blacklist, gverify.blacklist, group-verify.blacklist
+#      gv.黑名单, gverify.黑名单, group-verify.黑名单
+
+# 删除黑名单条目
+group-verify.blacklist r <用户ID> [群号]
+
+# 查看群黑名单
+group-verify.blacklist l [群号]
+# 传入 all 可查看全局黑名单
+
+# 查询用户在黑名单的状态
+group-verify.blacklist i <用户ID>
+```
+
+### 黑名单消息模板
+插件会在配置界面显示当前黑名单存在状态的提示词，用户可以通过修改以下字段自定义这些提示：
+
+- `blacklistLocalExists`：当前群已有黑名单条目时的提示，例如 “本群已设置黑名单”。
+- `blacklistGlobalExists`：全局黑名单存在时的提示，例如 “已启用全局黑名单”。
+
+如果将这两个字段留空，则对应的提示不会显示（界面将保持简洁）。
+
 ## ⚙️ 参数说明
 
 ### 审核方式 (-m)
@@ -186,6 +212,7 @@ group-verify.stats total
 - `group_verification_config` - 群组配置表
 - `group_verification_stats` - 统计信息表
 - `group_verification_pending` - 待审核申请表
+- `group_verification_blacklist` - 群组黑名单条目，每行记录一个用户（groupId=all 表示全局）
 
 ## 📝 使用示例
 

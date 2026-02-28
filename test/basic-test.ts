@@ -451,8 +451,13 @@ async function testBroadcastTarget() {
 // 黑名单辅助函数测试
 async function testBlacklistHelpers() {
   console.log('\n=== 测试 isUserBlacklisted 助手 ===')
-  let callArgs: any[] = []
-  const fakeCtx: any = { database: { get: async(table: string, where: any)=>{ callArgs.push([table, where]); return where.groupId === 'all' && where.userId === 'u1' ? [{userId:'u1'}] : where.groupId === '200' && where.userId === 'u2' ? [{userId:'u2'}] : [] } } }
+  const fakeCtx: any = { database: { get: async(table: string, where: any)=>{
+        if (table==='group_verification_blacklist') {
+          if (where.groupId === 'all') return [{entries: {'u1':'x'}}]
+          if (where.groupId === '200') return [{entries: {'u2':'r2'}}]
+        }
+        return []
+      } } }
   const res1 = await isUserBlacklisted(fakeCtx, '100', 'u1')
   const res2 = await isUserBlacklisted(fakeCtx, '200', 'u2')
   const res3 = await isUserBlacklisted(fakeCtx, '200', 'notlisted')
@@ -470,12 +475,12 @@ async function testBlacklistRejects() {
       get: async(table: string, where: any) => {
         if (table === 'group_verification_config') return [{reviewMethod:1, keywords:[], reviewParameters:0, reminderEnabled:true, reminderMessage:''}]
         if (table === 'group_verification_blacklist') {
-          if (where.groupId === 'all' && where.userId === 'bad') return [{userId:'bad'}]
-          if (where.groupId === '100' && where.userId === 'bad2') return [{userId:'bad2'}]
+          if (where.groupId === 'all') return [{entries: {'bad':'x'}}]
+          if (where.groupId === '100') return [{entries: {'bad2':'y'}}]
         }
         return []
       },
-      create: async()=>{}, remove: async()=>{}
+      create: async()=>{}, set: async()=>{}, remove: async()=>{}
     }
   }
   const fakeSession: any = { guildId:'100', userId:'bad', content:'', event:{requestId:'req1'}, messageId:'req1', bot:{handleGuildMemberRequest:async(_id:any, flag:boolean)=>{ actions.push(flag); }} }
@@ -491,15 +496,15 @@ async function testBlacklistRejects() {
 async function testBlacklistCommandProcessing() {
   console.log('\n=== 测试 黑名单命令处理 ===')
   const calls: any[] = []
-  const fakeCtx: any = { database: { remove: async(...a:any)=>calls.push(['remove',a]), create: async(...a:any)=>calls.push(['create',a]), get: async(_t:string, where:any)=>{ if(where.groupId==='200') return [{userId:'u'}]; return [] } } }
+  const fakeCtx: any = { database: { remove: async(...a:any)=>calls.push(['remove',a]), create: async(...a:any)=>calls.push(['create',a]), set: async(...a:any)=>calls.push(['set',a]), get: async(_t:string, where:any)=>{ if(where.groupId==='200') return [{entries:{'u':'r'}}]; if(where.groupId==='all') return [{entries:{}}]; return [] } } }
   const fakeSession: any = { guildId:'200', userId:'admin', author:{authority:3} }
-  let res = await processBlacklistCommand(fakeCtx, fakeSession, 'a u1 reason 200')
+  let res = await processBlacklistCommand(fakeCtx, fakeSession, 'a u1 reason 200', {})
   console.log('添加 ->', res.includes('已将用户') ? 'OK' : 'FAIL')
-  res = await processBlacklistCommand(fakeCtx, fakeSession, 'l 200')
+  res = await processBlacklistCommand(fakeCtx, fakeSession, 'l 200', {})
   console.log('列表 ->', res.includes('黑名单') ? 'OK' : 'FAIL')
-  res = await processBlacklistCommand(fakeCtx, fakeSession, 'i u')
+  res = await processBlacklistCommand(fakeCtx, fakeSession, 'i u', {})
   console.log('查询 ->', res.includes('本群黑名单') ? 'OK' : 'FAIL')
-  res = await processBlacklistCommand(fakeCtx, fakeSession, 'r u 200')
+  res = await processBlacklistCommand(fakeCtx, fakeSession, 'r u 200', {})
   console.log('删除 ->', res.includes('已从群') ? 'OK' : 'FAIL')
 }
 

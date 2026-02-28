@@ -1,6 +1,7 @@
 {
   "name": "koishi-plugin-group-verification",
-  "description": "Koishi 群组加群验证插件，支持多关键词匹配审核、多种审核方式和详细统计功能�?,
+  "description": "Koishi 群组加群验证插件，支持多关键词匹配审核、多种审核方式和详细统计功能",
+
   "repository": {
     "type": "git",
     "url": "https://github.com/LHDyx/koishi-plugin-group-verification.git"

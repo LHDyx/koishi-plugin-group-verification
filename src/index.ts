@@ -42,13 +42,13 @@ export interface GroupVerificationStats {
   lastUpdated: string | Date
 }
 
-// 黑名单条目，每一条记录一个用户及可选原因
+// 黑名单行：每个群/全局对应一条记录，entries 保存 userId->reason 对象
 export interface GroupBlacklistEntry {
   id: number
   groupId: string   // 群号或 "all" 表示全局
-  userId: string
-  reason?: string
+  entries: Record<string, string> // key=userId, value=reason
 }
+
 
 // 待审核申请表
 export interface PendingVerification {
@@ -71,6 +71,11 @@ export interface Config {
   invalidGroupMessage?: string
   parameterConflictMessage?: string
   noKeywordsMessage?: string
+  // 黑名单提示消息
+  blacklistAddSuccess?: string
+  blacklistRemoveSuccess?: string
+  blacklistListEmpty?: string
+  blacklistInfoTemplate?: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -83,6 +88,10 @@ export const Config: Schema<Config> = Schema.object({
   invalidGroupMessage: Schema.string().description('无效群号或机器人未在该群时的提示').default('群号 {group} 格式不合法或机器人不在该群中'),
   parameterConflictMessage: Schema.string().description('参数冲突时提示').default('参数冲突：-? 或 -r 不能与其他参数或关键词一起使用（仅可搭配 -i）'),
   noKeywordsMessage: Schema.string().description('未提供关键词且无法从现有配置继承时的提示').default('请先提供关键词创建配置，或使用 -? 查询配置，-r 删除配置'),
+  blacklistAddSuccess: Schema.string().description('将用户加入黑名单后的提示，可使用 {user},{group},{reason}').default('已将用户 {user} 加入群 {group} 黑名单{reason}'),
+  blacklistRemoveSuccess: Schema.string().description('从黑名单移除用户后的提示，可使用 {user},{group}').default('已从群 {group} 的黑名单中移除用户 {user}'),
+  blacklistListEmpty: Schema.string().description('黑名单为空时提示').default('群 {group} 的黑名单为空'),
+  blacklistInfoTemplate: Schema.string().description('查询指定用户状态时的模板，可用 {global},{group}').default('全局黑名单: {global}\n本群黑名单: {group}')
 })
   .description('群组验证插件配置')
 
@@ -838,15 +847,22 @@ export async function handleFailedVerification(
 // 检查指定用户是否在黑名单（群级或全局）中
 export async function isUserBlacklisted(ctx: Context, groupId: string, userId: string): Promise<boolean> {
   // 全局黑名单
-  const globalRows = await ctx.database.get('group_verification_blacklist', { groupId: 'all', userId })
-  if (globalRows.length > 0) return true
+  const globalRows = await ctx.database.get('group_verification_blacklist', { groupId: 'all' })
+  if (globalRows.length > 0) {
+    const entries = globalRows[0].entries || {}
+    if (entries[userId] !== undefined) return true
+  }
   // 群级黑名单
-  const groupRows = await ctx.database.get('group_verification_blacklist', { groupId, userId })
-  return groupRows.length > 0
+  const groupRows = await ctx.database.get('group_verification_blacklist', { groupId })
+  if (groupRows.length > 0) {
+    const entries = groupRows[0].entries || {}
+    if (entries[userId] !== undefined) return true
+  }
+  return false
 }
 
 // 解析并执行黑名单管理命令，返回要回复的字符串
-export async function processBlacklistCommand(ctx: Context, session: any, rawArgs: string): Promise<string> {
+export async function processBlacklistCommand(ctx: Context, session: any, rawArgs: string, config?: Config): Promise<string> {
   const parts = rawArgs.trim().split(/\s+/).filter(Boolean)
   const op = parts[0]?.toLowerCase()
   if (!op || !['a','r','l','i'].includes(op)) {
@@ -882,10 +898,20 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       const [ok, err] = await checkPermission(session, group)
       if (!ok) return err || '权限不足'
     }
-    // add entry
-    await ctx.database.remove('group_verification_blacklist', { groupId: group, userId: targetUser })
-    await ctx.database.create('group_verification_blacklist', { groupId: group, userId: targetUser, reason })
-    return `已将用户 ${targetUser} 加入群 ${group} 黑名单${reason ? `，原因：${reason}` : ''}`
+    // add entry to map
+    const rows = await ctx.database.get('group_verification_blacklist', { groupId: group })
+    if (rows.length > 0) {
+      const row = rows[0]
+      const entries = row.entries || {}
+      entries[targetUser] = reason || ''
+      await ctx.database.set('group_verification_blacklist', { id: row.id }, { entries })
+    } else {
+      const entries: Record<string,string> = {}
+      entries[targetUser] = reason || ''
+      await ctx.database.create('group_verification_blacklist', { groupId: group, entries })
+    }
+    const tmpl = (config && config.blacklistAddSuccess) || '已将用户 {user} 加入群 {group} 黑名单{reason}'
+    return tmpl.replace('{user}', targetUser).replace('{group}', group).replace('{reason}', reason ? `，原因：${reason}` : '')
   }
   if (op === 'r') {
     targetUser = parts[1]
@@ -899,8 +925,15 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       const [ok, err] = await checkPermission(session, group)
       if (!ok) return err || '权限不足'
     }
-    await ctx.database.remove('group_verification_blacklist', { groupId: group, userId: targetUser })
-    return `已从群 ${group} 的黑名单中移除用户 ${targetUser}`
+    const rows = await ctx.database.get('group_verification_blacklist', { groupId: group })
+    if (rows.length > 0) {
+      const row = rows[0]
+      const entries = row.entries || {}
+      delete entries[targetUser]
+      await ctx.database.set('group_verification_blacklist', { id: row.id }, { entries })
+    }
+    const tmpl = (config && config.blacklistRemoveSuccess) || '已从群 {group} 的黑名单中移除用户 {user}'
+    return tmpl.replace('{user}', targetUser).replace('{group}', group)
   }
   if (op === 'l') {
     group = parts[1] || getCurrentGroup()
@@ -914,10 +947,14 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     }
     const rows = await ctx.database.get('group_verification_blacklist', { groupId: group })
     if (rows.length === 0) {
-      return `群 ${group} 的黑名单为空`
+      const tmpl = (config && config.blacklistListEmpty) || '群 {group} 的黑名单为空'
+      return tmpl.replace('{group}', group)
     }
+    const entries = rows[0].entries || {}
     let msg = `群 ${group} 黑名单：\n`
-    rows.forEach(r => { msg += `${r.userId}${r.reason ? `：${r.reason}` : ''}\n` })
+    for (const uid in entries) {
+      msg += `${uid}${entries[uid] ? `：${entries[uid]}` : ''}\n`
+    }
     return msg
   }
   if (op === 'i') {
@@ -927,11 +964,19 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     if (!groupId) return '请在群聊中使用此命令'
     const [ok, err] = await checkPermission(session, groupId)
     if (!ok) return err || '权限不足'
-    const globalRows = await ctx.database.get('group_verification_blacklist', { groupId: 'all', userId: targetUser })
-    const groupRows = await ctx.database.get('group_verification_blacklist', { groupId: groupId, userId: targetUser })
-    let msg = `全局黑名单: ${globalRows.length ? '有' : '无'}\n`
-    msg += `本群黑名单: ${groupRows.length ? '有' : '无'}`
-    return msg
+    // 查找所有行，返回每个群的状态
+    const rows = await ctx.database.get('group_verification_blacklist', {})
+    let globalHit = false
+    const groups: string[] = []
+    for (const r of rows) {
+      const entries = r.entries || {}
+      if (entries[targetUser] !== undefined) {
+        if (r.groupId === 'all') globalHit = true
+        else groups.push(`${r.groupId}${entries[targetUser] ? `(${entries[targetUser]})` : ''}`)
+      }
+    }
+    const tmpl = (config && config.blacklistInfoTemplate) || '全局黑名单: {global}\n本群黑名单: {group}'
+    return tmpl.replace('{global}', globalHit ? '有' : '无').replace('{group}', groups.length ? groups.join(',') : '无')
   }
   return ''
 }
@@ -1000,15 +1045,15 @@ export function apply(ctx: Context, config: Config) {
     autoInc: true
   })
 
-  // 黑名单表：每条记录对应一个用户，可查群级或全局(all)
+  // 黑名单表：每条记录对应一个群（或全局），entries 存储 userId->reason 键值对
   ctx.model.extend('group_verification_blacklist', {
     id: 'unsigned',
     groupId: 'string',
-    userId: 'string',
-    reason: 'string'
+    entries: 'json'
   } as any, {
     primary: 'id',
-    autoInc: true
+    autoInc: true,
+    indexes: [ ['groupId'] ]
   })
 
 
@@ -1809,7 +1854,7 @@ export function apply(ctx: Context, config: Config) {
       'gv.黑名单', 'gverify.黑名单', 'group-verify.黑名单'
     )
     .action(async ({ session }, args) => {
-      return await processBlacklistCommand(ctx, session, args || '')
+      return await processBlacklistCommand(ctx, session, args || '', config)
     })
 
   // Subcommand: help information
