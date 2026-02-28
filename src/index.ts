@@ -11,6 +11,7 @@ declare module 'koishi' {
     group_verification_config: GroupVerificationConfig
     group_verification_stats: GroupVerificationStats
     group_verification_pending: PendingVerification
+    group_verification_blacklist: GroupBlacklistEntry
   }
 }
 
@@ -41,6 +42,14 @@ export interface GroupVerificationStats {
   lastUpdated: string | Date
 }
 
+// 黑名单条目，每一条记录一个用户及可选原因
+export interface GroupBlacklistEntry {
+  id: number
+  groupId: string   // 群号或 "all" 表示全局
+  userId: string
+  reason?: string
+}
+
 // 待审核申请表
 export interface PendingVerification {
   id: number
@@ -67,7 +76,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   defaultReminderMessage: Schema.string()
     .description('默认提醒消息模板（使用 \\n 表示换行，可包含下方变量）')
-    .default('{user}({id}) 申请加入群 {gname}({group})\\n申请理由：{question}\\n匹配情况：{answer}/{threshold}\\n使用 gva 同意或 gvr 拒绝申请'),
+    .default('{user}({id}) 申请加入群 {gname}({group})\n申请理由：{question}\n匹配情况：{answer}/{threshold}\n使用 gva 同意或 gvr 拒绝申请'),
   enableStrictGroupCheck: Schema.boolean().description('是否启用严格的群号检查（检查群号长度）').default(false),
   logLevel: Schema.union(['debug', 'info', 'warn', 'error']).description('日志级别').default('info'),
   permissionDeniedMessage: Schema.string().description('权限不足时返回给调用者的提示').default('权限不足：需要群主/管理员权限或koishi三级以上权限'),
@@ -533,6 +542,21 @@ export async function handleGuildMemberRequestEvent(ctx: Context, session: any) 
     return;
   }
 
+  // 黑名单优先检查（仅在非全拒模式下）
+  try {
+    const blacklisted = await isUserBlacklisted(ctx, guildId, userId);
+    if (blacklisted) {
+      logger.info(`用户 ${userId} 在群 ${guildId} 或全局黑名单中，自动拒绝申请`);
+      if (requestId) {
+        try { await session.bot.handleGuildMemberRequest(requestId, false); } catch (e) { logger.warn('自动拒绝失败', e); }
+      }
+      await updateStats(ctx, guildId, 'rejected');
+      return;
+    }
+  } catch (e) {
+    logger.warn('黑名单检查失败', e);
+  }
+
   const { isValid, matchedCount, requiredThreshold } = await verifyApplication(config, message, session);
   logger.debug(`验证结果 guild=${guildId} user=${userId} msg="${message}" matched=${matchedCount} threshold=${requiredThreshold} valid=${isValid}`);
 
@@ -809,6 +833,109 @@ export async function handleFailedVerification(
   }
 }
 
+// 黑名单相关辅助函数 ----------------------------------------------------------
+
+// 检查指定用户是否在黑名单（群级或全局）中
+export async function isUserBlacklisted(ctx: Context, groupId: string, userId: string): Promise<boolean> {
+  // 全局黑名单
+  const globalRows = await ctx.database.get('group_verification_blacklist', { groupId: 'all', userId })
+  if (globalRows.length > 0) return true
+  // 群级黑名单
+  const groupRows = await ctx.database.get('group_verification_blacklist', { groupId, userId })
+  return groupRows.length > 0
+}
+
+// 解析并执行黑名单管理命令，返回要回复的字符串
+export async function processBlacklistCommand(ctx: Context, session: any, rawArgs: string): Promise<string> {
+  const parts = rawArgs.trim().split(/\s+/).filter(Boolean)
+  const op = parts[0]?.toLowerCase()
+  if (!op || !['a','r','l','i'].includes(op)) {
+    return '用法：gvb a <id> [reason] [group] | gvb r <id> [group] | gvb l [group] | gvb i <id>'
+  }
+
+  const getCurrentGroup = () => session.guildId || ''
+  let group: string | undefined
+  let targetUser: string | undefined
+  let reason = ''
+
+  if (op === 'a') {
+    targetUser = parts[1]
+    if (!targetUser) return '请提供用户ID'
+    // handle optional reason and group at end
+    const rest = parts.slice(2)
+    if (rest.length > 0) {
+      const last = rest[rest.length - 1]
+      if (/^\d+$/.test(last) || last.toLowerCase() === 'all') {
+        group = last
+        reason = rest.slice(0, -1).join(' ')
+      } else {
+        reason = rest.join(' ')
+      }
+    }
+    group = group || getCurrentGroup()
+    if (!group) return '请在群聊中使用此命令或指定群号'
+    // 权限检查
+    if (group.toLowerCase() === 'all') {
+      const auth = session.author?.authority || session.user?.authority
+      if (!(auth && auth >= 3)) return '设置全局黑名单需要 koishi 3 级以上权限'
+    } else {
+      const [ok, err] = await checkPermission(session, group)
+      if (!ok) return err || '权限不足'
+    }
+    // add entry
+    await ctx.database.remove('group_verification_blacklist', { groupId: group, userId: targetUser })
+    await ctx.database.create('group_verification_blacklist', { groupId: group, userId: targetUser, reason })
+    return `已将用户 ${targetUser} 加入群 ${group} 黑名单${reason ? `，原因：${reason}` : ''}`
+  }
+  if (op === 'r') {
+    targetUser = parts[1]
+    if (!targetUser) return '请提供用户ID'
+    group = parts[2] || getCurrentGroup()
+    if (!group) return '请在群聊中使用此命令或指定群号'
+    if (group.toLowerCase() === 'all') {
+      const auth = session.author?.authority || session.user?.authority
+      if (!(auth && auth >= 3)) return '修改全局黑名单需要 koishi 3 级以上权限'
+    } else {
+      const [ok, err] = await checkPermission(session, group)
+      if (!ok) return err || '权限不足'
+    }
+    await ctx.database.remove('group_verification_blacklist', { groupId: group, userId: targetUser })
+    return `已从群 ${group} 的黑名单中移除用户 ${targetUser}`
+  }
+  if (op === 'l') {
+    group = parts[1] || getCurrentGroup()
+    if (!group) return '请在群聊中使用此命令或指定群号'
+    if (group.toLowerCase() === 'all') {
+      const auth = session.author?.authority || session.user?.authority
+      if (!(auth && auth >= 3)) return '查看全局黑名单需要 koishi 3 级以上权限'
+    } else {
+      const [ok, err] = await checkPermission(session, group)
+      if (!ok) return err || '权限不足'
+    }
+    const rows = await ctx.database.get('group_verification_blacklist', { groupId: group })
+    if (rows.length === 0) {
+      return `群 ${group} 的黑名单为空`
+    }
+    let msg = `群 ${group} 黑名单：\n`
+    rows.forEach(r => { msg += `${r.userId}${r.reason ? `：${r.reason}` : ''}\n` })
+    return msg
+  }
+  if (op === 'i') {
+    targetUser = parts[1]
+    if (!targetUser) return '请提供用户ID'
+    const groupId = getCurrentGroup()
+    if (!groupId) return '请在群聊中使用此命令'
+    const [ok, err] = await checkPermission(session, groupId)
+    if (!ok) return err || '权限不足'
+    const globalRows = await ctx.database.get('group_verification_blacklist', { groupId: 'all', userId: targetUser })
+    const groupRows = await ctx.database.get('group_verification_blacklist', { groupId: groupId, userId: targetUser })
+    let msg = `全局黑名单: ${globalRows.length ? '有' : '无'}\n`
+    msg += `本群黑名单: ${groupRows.length ? '有' : '无'}`
+    return msg
+  }
+  return ''
+}
+
 export function apply(ctx: Context, config: Config) {
   // 创建数据库表
   ctx.model.extend('group_verification_config', {
@@ -868,6 +995,17 @@ export function apply(ctx: Context, config: Config) {
     requestId: 'string',
     // record full timestamp as string to keep time component
     applyTime: 'string'
+  } as any, {
+    primary: 'id',
+    autoInc: true
+  })
+
+  // 黑名单表：每条记录对应一个用户，可查群级或全局(all)
+  ctx.model.extend('group_verification_blacklist', {
+    id: 'unsigned',
+    groupId: 'string',
+    userId: 'string',
+    reason: 'string'
   } as any, {
     primary: 'id',
     autoInc: true
@@ -1172,7 +1310,7 @@ export function apply(ctx: Context, config: Config) {
 审核方式: ${methodDesc}
 阈值: ${thresholdInfo}
 提醒消息: ${reminderStatus}
-自定义消息: ${config.reminderMessage || '无'}
+自定义消息:\n${config.reminderMessage || '无'}
 创建时间: ${createTime}
 更新时间: ${updateTime}
 创建者: ${config.createdBy}
@@ -1353,7 +1491,8 @@ export function apply(ctx: Context, config: Config) {
       
       feedbackMessage += `提醒状态: ${reminderEnabled ? '启用' : '禁用'}\n`
       if (reminderMessage && reminderEnabled) {
-        feedbackMessage += `提醒消息: ${reminderMessage.substring(0, 30)}${reminderMessage.length > 30 ? '...' : ''}\n`
+        // show full message on its own lines so users can see everything
+        feedbackMessage += `提醒消息:\n${reminderMessage}\n`
       }
       
       
@@ -1661,6 +1800,18 @@ export function apply(ctx: Context, config: Config) {
       return result
     })
 
+  // Subcommand: blacklist management
+  groupVerify
+    .subcommand('.blacklist [args:text]', '管理加群黑名单')
+    .alias(
+      'gvb',
+      'gv.blacklist', 'gverify.blacklist', 'group-verify.blacklist',
+      'gv.黑名单', 'gverify.黑名单', 'group-verify.黑名单'
+    )
+    .action(async ({ session }, args) => {
+      return await processBlacklistCommand(ctx, session, args || '')
+    })
+
   // Subcommand: help information
   groupVerify
     .subcommand('.help', '显示帮助信息')
@@ -1716,6 +1867,18 @@ export function apply(ctx: Context, config: Config) {
     gv.cfg -msg "用户 {user}\\n申请理由：{question}"
     gv.cfg -m 2 -t 80
     gv.cfg -nomsg
+
+黑名单命令 (.blacklist / gvb):
+  a <id> [reason] [group]   添加黑名单，可指定原因和群号；group为all表示全局
+  r <id> [group]             删除条目
+  l [group]                  查看某个群（或 all）的黑名单
+  i <id>                     查询指定用户在当前群与全局的状态
+使用示例：
+    gvb a 12345 作弊记录
+    gvb r 12345 67890
+    gvb l
+    gvb l all
+    gvb i 12345
 
 快捷命令：
   gvc - 配置命令快捷方式

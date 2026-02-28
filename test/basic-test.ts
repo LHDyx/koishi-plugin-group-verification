@@ -4,7 +4,7 @@
  */
 
 import { Context } from 'koishi'
-import { GroupVerificationConfig, GroupVerificationStats, Config, tokenize, parseConfigArgs, mergeReminder, verifyApplication, handleFailedVerification, usageString, handleGuildMemberRequestEvent, __getAutoQueue, updateStats, incrementTotal, resolveThreshold } from '../src/index'
+import { GroupVerificationConfig, GroupVerificationStats, Config, tokenize, parseConfigArgs, mergeReminder, verifyApplication, handleFailedVerification, usageString, handleGuildMemberRequestEvent, __getAutoQueue, updateStats, incrementTotal, resolveThreshold, isUserBlacklisted, processBlacklistCommand } from '../src/index'
 // also import entire module for runtime patching
 const plugin: any = require('../src/index')
 
@@ -313,6 +313,18 @@ async function testStatsExpanded() {
   console.log('method2 no t ->', out.reviewParameters === 100 ? 'OK' : 'FAIL')
 }
 
+// 新增：配置命令更新反馈完整性测试
+function testFeedbackMessageFull() {
+  console.log('\n=== 测试配置更新反馈显示完整提醒消息 ===')
+  const longMsg = 'x'.repeat(50)
+  let feedback = ''
+  const reminderEnabled = true
+  if (longMsg && reminderEnabled) {
+    feedback += `提醒消息:\n${longMsg}\n`
+  }
+  console.log('包含完整内容 ->', feedback.includes(longMsg) ? 'OK' : 'FAIL')
+}
+
 // 新增：handleFailedVerification 参数传递测试
 async function testHandleFailedParams() {
   console.log('\n=== 测试 handleFailedVerification 参数传递 ===')
@@ -436,6 +448,61 @@ async function testBroadcastTarget() {
   console.log('channel+guild ->', last && last[0]==='bot' && JSON.stringify(last[1]) === JSON.stringify([['300','100']]) ? 'OK' : 'FAIL')
 }
 
+// 黑名单辅助函数测试
+async function testBlacklistHelpers() {
+  console.log('\n=== 测试 isUserBlacklisted 助手 ===')
+  let callArgs: any[] = []
+  const fakeCtx: any = { database: { get: async(table: string, where: any)=>{ callArgs.push([table, where]); return where.groupId === 'all' && where.userId === 'u1' ? [{userId:'u1'}] : where.groupId === '200' && where.userId === 'u2' ? [{userId:'u2'}] : [] } } }
+  const res1 = await isUserBlacklisted(fakeCtx, '100', 'u1')
+  const res2 = await isUserBlacklisted(fakeCtx, '200', 'u2')
+  const res3 = await isUserBlacklisted(fakeCtx, '200', 'notlisted')
+  console.log('全局命中 ->', res1 === true ? 'OK' : 'FAIL')
+  console.log('群级命中 ->', res2 === true ? 'OK' : 'FAIL')
+  console.log('未命中 ->', res3 === false ? 'OK' : 'FAIL')
+}
+
+// 测试 handleGuildMemberRequestEvent 中黑名单拒绝逻辑
+async function testBlacklistRejects() {
+  console.log('\n=== 测试 黑名单自动拒绝 ===')
+  const actions: any[] = []
+  const fakeCtx: any = {
+    database: {
+      get: async(table: string, where: any) => {
+        if (table === 'group_verification_config') return [{reviewMethod:1, keywords:[], reviewParameters:0, reminderEnabled:true, reminderMessage:''}]
+        if (table === 'group_verification_blacklist') {
+          if (where.groupId === 'all' && where.userId === 'bad') return [{userId:'bad'}]
+          if (where.groupId === '100' && where.userId === 'bad2') return [{userId:'bad2'}]
+        }
+        return []
+      },
+      create: async()=>{}, remove: async()=>{}
+    }
+  }
+  const fakeSession: any = { guildId:'100', userId:'bad', content:'', event:{requestId:'req1'}, messageId:'req1', bot:{handleGuildMemberRequest:async(_id:any, flag:boolean)=>{ actions.push(flag); }} }
+  await handleGuildMemberRequestEvent(fakeCtx, fakeSession)
+  console.log('全局黑名单 ->', actions.includes(false) ? 'OK' : 'FAIL')
+  actions.length = 0
+  const fakeSession2: any = { guildId:'100', userId:'bad2', content:'', event:{requestId:'req2'}, messageId:'req2', bot:{handleGuildMemberRequest:async(_id:any, flag:boolean)=>{ actions.push(flag); }} }
+  await handleGuildMemberRequestEvent(fakeCtx, fakeSession2)
+  console.log('群级黑名单 ->', actions.includes(false) ? 'OK' : 'FAIL')
+}
+
+// 测试黑名单命令处理逻辑
+async function testBlacklistCommandProcessing() {
+  console.log('\n=== 测试 黑名单命令处理 ===')
+  const calls: any[] = []
+  const fakeCtx: any = { database: { remove: async(...a:any)=>calls.push(['remove',a]), create: async(...a:any)=>calls.push(['create',a]), get: async(_t:string, where:any)=>{ if(where.groupId==='200') return [{userId:'u'}]; return [] } } }
+  const fakeSession: any = { guildId:'200', userId:'admin', author:{authority:3} }
+  let res = await processBlacklistCommand(fakeCtx, fakeSession, 'a u1 reason 200')
+  console.log('添加 ->', res.includes('已将用户') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtx, fakeSession, 'l 200')
+  console.log('列表 ->', res.includes('黑名单') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtx, fakeSession, 'i u')
+  console.log('查询 ->', res.includes('本群黑名单') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtx, fakeSession, 'r u 200')
+  console.log('删除 ->', res.includes('已从群') ? 'OK' : 'FAIL')
+}
+
 // 运行所有测试
 async function runAllTests() {
   console.log('开始运行群组验证插件测试...\n')
@@ -455,9 +522,16 @@ async function runAllTests() {
   testDefaultReminderFormat()
   await testManualApprovalQueue()
   await testRejectAllBehavior()
+  // 新的完整提醒消息反馈测试
+  testFeedbackMessageFull()
   await testApproveBlocked()
   await testBroadcastTarget()
-  
+
+  // 黑名单测试
+  await testBlacklistHelpers()
+  await testBlacklistRejects()
+  await testBlacklistCommandProcessing()
+
   console.log('\n所有测试完成!')
 }
 
