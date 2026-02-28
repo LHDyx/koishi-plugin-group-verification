@@ -1,22 +1,50 @@
 {
   "name": "koishi-plugin-group-verification",
-  "description": "Koishi 群组加群验证插件，支持多关键词匹配审核、黑名单过滤和详细统计功能",
-  "version": "0.0.1",
+  "description": "Koishi 群组加群验证插件，支持多关键词匹配审核、多种审核方式和详细统计功能。",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LHDyx/koishi-plugin-group-verification.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LHDyx/koishi-plugin-group-verification/issues"
+  },
+  "version": "1.0.28",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
-    "dist"
+    "dist",
+    "src",
+    "README.md",
+    "USAGE_EXAMPLE.md"
   ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "test": "ts-node test/basic-test.ts"
+  },
   "license": "MIT",
-  "scripts": {},
   "keywords": [
     "chatbot",
     "koishi",
-    "plugin"
+    "plugin",
+    "group-verification",
+    "guild-management",
+    "join-request",
+    "moderation"
   ],
-  "devDependencies": {},
+  "koishi": {
+    "service": {
+      "required": [
+        "database"
+      ]
+    }
+  },
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "koishi": "^4.15.0"
+  },
+  "devDependencies": {
+    "typescript": "^4.9.0",
+    "@types/node": "^16.0.0"
   }
 }
