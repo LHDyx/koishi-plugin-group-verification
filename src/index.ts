@@ -1,9 +1,39 @@
-import { Context, Schema, Session } from 'koishi'
+﻿import { Context, Schema, Session } from 'koishi'
 
 export const name = 'group-verification'
 
 // 模块级日志器，测试时使用 console
 let logger: any = console
+
+// 当前日志详细度（由 apply() 在插件激活时写入）
+let pluginLogLevel: '详细' | '中等' | '简洁' = '中等'
+
+/**
+ * 三档日志输出：
+ *  简洁 — 只输出 warn/error
+ *  中等 — 输出所有级别的简短消息（mediumMsg）
+ *  详细 — 输出详细消息（verboseMsg，缺省时使用 mediumMsg）
+ */
+function clog(
+  lvl: 'debug' | 'info' | 'warn' | 'error',
+  mediumMsg: string,
+  verboseMsg?: string
+): void {
+  if (pluginLogLevel === '简洁') {
+    if (lvl === 'warn' || lvl === 'error') logger[lvl](mediumMsg)
+  } else if (pluginLogLevel === '详细') {
+    logger[lvl](verboseMsg ?? mediumMsg)
+  } else {
+    // 中等模式: debug 级别提升为 info 输出，避免被 Koishi 框架过滤
+    const outputLvl = lvl === 'debug' ? 'info' : lvl
+    logger[outputLvl](mediumMsg)
+  }
+}
+
+/** 仅在 详细 模式下输出 debug 日志（支持传入对象，与 Koishi logger.debug(msg, obj) 一致） */
+function clogV(msg: string, ...args: any[]): void {
+  if (pluginLogLevel === '详细') logger.debug(msg, ...args)
+}
 
 // 数据库模型定义
 declare module 'koishi' {
@@ -65,7 +95,7 @@ export interface PendingVerification {
 export interface Config {
   defaultReminderMessage?: string
   enableStrictGroupCheck?: boolean  // 群号合法性检查配置
-  logLevel?: 'debug' | 'info' | 'warn' | 'error'  // 日志等级配置
+  logLevel?: 'debug' | 'info' | 'warn'  // 日志详细程度
   // 以下为可自定义的命令反馈提示词，可在插件管理界面调整
   permissionDeniedMessage?: string
   invalidGroupMessage?: string
@@ -83,7 +113,7 @@ export const Config: Schema<Config> = Schema.object({
     .description('默认提醒消息模板（使用 \\n 表示换行，可包含下方变量）')
     .default('{user}({id}) 申请入群\\n申请理由: {question}\\n匹配情况: {answer}/{threshold}\\n使用 gva 同意或 gvr 拒绝申请'),
   enableStrictGroupCheck: Schema.boolean().description('是否启用严格的群号检查（检查群号长度）').default(false),
-  logLevel: Schema.union(['debug', 'info', 'warn', 'error']).description('日志级别').default('info'),
+  logLevel: Schema.union(['debug', 'info', 'warn']).description('日志详细程度').default('info'),  // debug=详细, info=中等, warn=简洁
   permissionDeniedMessage: Schema.string().description('权限不足时返回给调用者的提示').default('权限不足: 需要群主/管理员权限或koishi三级以上权限'),
   invalidGroupMessage: Schema.string().description('无效群号或机器人未在该群时的提示').default('群号 {group} 格式不合法或机器人不在该群中'),
   parameterConflictMessage: Schema.string().description('参数冲突时提示').default('参数冲突: -? 或 -r 不能与其他参数或关键词一起使用（仅可搭配 -i）'),
@@ -307,16 +337,16 @@ export function mergeReminder(
   // 优先级: disable > bare enable > new message content
   if (hasRealDisableMessageParam) {
     reminderEnabled = false;
-    logger.debug('禁用提醒消息功能 (保留现有内容)');
+    clog('debug', '禁用提醒消息功能 (保留现有内容)');
   } else if (hasRealEnableMessageParam) {
     reminderEnabled = true;
-    logger.debug(`启用提醒消息（保留原消息）: ${reminderMessage.substring(0, 50)}...`);
+    clog('debug', `启用提醒消息（保留原消息）: ${reminderMessage.substring(0, 50)}...`);
   } else if (hasRealMessageParam) {
     reminderEnabled = true;
     if (cleanedOptions.message !== undefined) {
       // 直接存储原始内容（\n 作为换行占位符，渲染时再转换）
       reminderMessage = cleanedOptions.message;
-      logger.debug(`设置自定义提醒消息: ${reminderMessage.substring(0, 50)}...`);
+      clog('debug', `设置自定义提醒消息: ${reminderMessage.substring(0, 50)}...`);
     }
   }
   return { reminderEnabled, reminderMessage };
@@ -356,7 +386,7 @@ export async function syncTotalStats(ctx: Context) {
         lastUpdated: new Date().toISOString()
       })
       
-      logger.debug(`总计统计已同步: 自动批准${totalAutoApproved}, 手动批准${totalManuallyApproved}, 拒绝${totalRejected}, 入群${totalJoined}`)
+      clog('debug', `总计统计已同步: 自动批准${totalAutoApproved}, 手动批准${totalManuallyApproved}, 拒绝${totalRejected}, 入群${totalJoined}`)
     }
   } catch (error) {
     logger.error('同步总计统计时出错:', error)
@@ -478,50 +508,50 @@ export async function checkPermission(session: any, targetGroupId?: string): Pro
     return [false, '请在群聊中使用此命令或使用 -i 参数指定群号']
   }
   
-  logger.debug(`权限检查 - 用户ID: ${session.userId}, 群号: ${groupId}`)
   const koishiAuthority = session.author?.authority || session.user?.authority
-  logger.debug(`权限检查 - Koishi权限等级: ${koishiAuthority || '未获取到'}`)
-  
+  clogV(`权限检查 - 用户ID: ${session.userId}, 群号: ${groupId}`)
+  clogV(`权限检查 - Koishi权限等级: ${koishiAuthority || '未获取到'}`)
   if (!session.author) {
-    logger.debug(`权限检查 - session中可能的权限字段:`, {
+    clogV(`权限检查 - session中可能的权限字段:`, {
       authority: session.authority,
       permission: session.permission,
       role: session.role
     })
   } else {
-    logger.debug(`权限检查 - author对象中的字段:`, {
+    clogV(`权限检查 - author对象中的字段:`, {
       permission: session.author.permission,
       role: session.author.role,
       permissions: session.author.permissions
     })
   }
-  
   if (session.user) {
-    logger.debug(`权限检查 - user对象中的权限信息:`, {
+    clogV(`权限检查 - user对象中的权限信息:`, {
       authority: session.user.authority,
       permission: session.user.permission,
       role: session.user.role
     })
   }
-  
   if (koishiAuthority && koishiAuthority >= 3) {
-    logger.debug(`权限检查 - 通过koishi权限检查: ${koishiAuthority}`)
+    clogV(`权限检查 - 通过koishi权限检查: ${koishiAuthority}`)
+    clog('debug', `权限通过(koishi): uid=${session.userId} authority=${koishiAuthority}`)
     return [true]
   }
   
   try {
     const member = await session.bot.getGuildMember(groupId, session.userId)
-    logger.debug(`权限检查 - 获取到成员信息:`, {
+    clogV(`权限检查 - 获取到成员信息:`, {
       roles: member?.roles,
       permissions: member?.permissions
     })
     if (member) {
       if (member.permissions?.includes('OWNER') || member.roles?.includes('owner')) {
-        logger.debug(`权限检查 - 用户是群主`)
+        clogV(`权限检查 - 用户是群主`)
+        clog('debug', `权限通过(群主): uid=${session.userId}`)
         return [true]
       }
       if (member.roles?.includes('admin') || member.permissions?.includes('ADMINISTRATOR')) {
-        logger.debug(`权限检查 - 用户是管理员`)
+        clogV(`权限检查 - 用户是管理员`)
+        clog('debug', `权限通过(管理员): uid=${session.userId}`)
         return [true]
       }
     }
@@ -534,9 +564,10 @@ export async function checkPermission(session: any, targetGroupId?: string): Pro
 
 // 提供给测试的辅助函数: 处理 guild-member-request 事件的逻辑
 export async function handleGuildMemberRequestEvent(ctx: Context, session: any) {
-  logger.debug('guild-member-request event', session)
+  clogV('guild-member-request event', session)
   let guildId = (session.guildId || session.channelId || '').toString().trim();
   const userId = session.userId;
+  clog('debug', `guild-member-request: guild=${guildId} user=${userId}`);
   const message = session.content || '';
 
   if (!guildId) {
@@ -550,7 +581,7 @@ export async function handleGuildMemberRequestEvent(ctx: Context, session: any) 
   const config = groupConfig[0];
 
   if (config.reviewMethod === 3) {
-    logger.info(`配置要求全部拒绝，自动拒绝用户 ${userId}`);
+    clog('info', `配置要求全部拒绝，自动拒绝用户 ${userId}`);
     if (requestId) {
       try { await session.bot.handleGuildMemberRequest(requestId, false); } catch (e) { logger.warn('自动拒绝失败', e); }
     }
@@ -562,7 +593,7 @@ export async function handleGuildMemberRequestEvent(ctx: Context, session: any) 
   try {
     const blacklisted = await isUserBlacklisted(ctx, guildId, userId);
     if (blacklisted) {
-      logger.info(`用户 ${userId} 在群 ${guildId} 或全局黑名单中，自动拒绝申请`);
+      clog('info', `用户 ${userId} 在群 ${guildId} 或全局黑名单中，自动拒绝申请`);
       if (requestId) {
         try { await session.bot.handleGuildMemberRequest(requestId, false); } catch (e) { logger.warn('自动拒绝失败', e); }
       }
@@ -574,13 +605,15 @@ export async function handleGuildMemberRequestEvent(ctx: Context, session: any) 
   }
 
   const { isValid, matchedCount, requiredThreshold } = await verifyApplication(config, message, session);
-  logger.debug(`验证结果 guild=${guildId} user=${userId} msg="${message}" matched=${matchedCount} threshold=${requiredThreshold} valid=${isValid}`);
+  clogV(`验证结果 guild=${guildId} user=${userId} msg="${message}" matched=${matchedCount} threshold=${requiredThreshold} valid=${isValid}`);
 
   if (isValid) {
     if (requestId) {
       try {
         await session.bot.handleGuildMemberRequest(requestId, true);
-        logger.debug(`自动同意 requestId=${requestId}`);
+        clogV(`自动同意 requestId=${requestId}`);
+        // 自动批准成功，立即记录统计（不依赖 guild-member-added 事件）
+        await updateStats(ctx, guildId, 'autoApproved');
         if (!autoQueue.has(guildId)) autoQueue.set(guildId, new Set());
         autoQueue.get(guildId)!.add(userId);
       } catch (e) {
@@ -750,7 +783,8 @@ export async function verifyApplication(config: GroupVerificationConfig, message
       requiredThreshold = 'null'
   }
 
-  logger.debug(`verifyApplication msg="${message}" keywords=${JSON.stringify(config.keywords)} matched=${matchedCount} threshold=${requiredThreshold} valid=${isValid}`)
+  clog('debug', `verify: matched=${matchedCount}/${requiredThreshold} valid=${isValid}`,
+    `verifyApplication msg="${message}" keywords=${JSON.stringify(config.keywords)} matched=${matchedCount} threshold=${requiredThreshold} valid=${isValid}`)
   return { isValid, matchedCount, requiredThreshold }
 }
 
@@ -771,7 +805,8 @@ export async function handleFailedVerification(
   }
   const username = session.username || '未知用户'
   const message = session.content || ''
-  logger.debug(`处理失败验证 guild=${guildId} user=${userId} msg="${message}" matched=${matchedCount} threshold=${requiredThreshold}`)
+  clog('debug', `待审核: guild=${guildId} user=${userId} matched=${matchedCount}/${requiredThreshold}`,
+    `处理失败验证 guild=${guildId} user=${userId} msg="${session.content || ''}" matched=${matchedCount} threshold=${requiredThreshold}`)
   // 如果未传入匹配信息，则重新计算一次（老调用）
   if (matchedCount === undefined || requiredThreshold === undefined) {
     const result = await verifyApplication(config, message, session)
@@ -805,7 +840,7 @@ export async function handleFailedVerification(
   })
   // 如果提醒消息被禁用，直接返回
   if (!config.reminderEnabled || !config.reminderMessage || config.reminderMessage === '') {
-    logger.debug(`群 ${guildId} 的提醒消息已被禁用，跳过发送`)
+    clog('debug', `群 ${guildId} 的提醒消息已被禁用，跳过发送`)
     return
   }
 
@@ -829,7 +864,7 @@ export async function handleFailedVerification(
   const rawChannel = (session.channelId || '').toString().trim()
   const channel = rawChannel || guildId
   const target: string | [string, string] = rawChannel ? [channel, guildId] : guildId
-  logger.debug('broadcast target', { channel, guildId, target })
+  clog('debug', `broadcast target: channel=${channel} guild=${guildId}`)
   // 优先使用 bot.broadcast，ctx.broadcast 可能不支持元组格式
   if (session.bot && typeof session.bot.broadcast === 'function') {
     try {
@@ -840,14 +875,14 @@ export async function handleFailedVerification(
       if (typeof (ctx.broadcast) === 'function') {
         await (ctx.broadcast as any)([target], reminderMsg)
       } else {
-        logger.info('ctx.broadcast 不可用，跳过发送')
+        clog('info', 'ctx.broadcast 不可用，跳过发送')
       }
     }
   } else {
     if (typeof (ctx.broadcast) === 'function') {
       await (ctx.broadcast as any)([target], reminderMsg)
     } else {
-      logger.info('ctx.broadcast 不可用，跳过发送')
+      clog('info', 'ctx.broadcast 不可用，跳过发送')
     }
   }
 }
@@ -948,7 +983,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     if (session.bot && typeof session.bot.kickGuildMember === 'function') {
       try {
         await session.bot.kickGuildMember(group, targetUser)
-        logger.info(`已将黑名单用户 ${targetUser} 从群 ${group} 踢出`)        
+        clog('info', `已将黑名单用户 ${targetUser} 从群 ${group} 踢出`)        
       } catch (e) {
         logger.warn(`踢出用户 ${targetUser} 失败`, e)
       }
@@ -1108,17 +1143,16 @@ export function apply(ctx: Context, config: Config) {
 
   // 获取logger实例并保存到模块级变量
   logger = ctx.logger('group-verification')
-  // 根据配置调整日志等级
-  if (config.logLevel) logger.level = config.logLevel
-  
-  // 设置日志级别
-  // 注意: Koishi logger的level设置可能需要不同的方式
+  // 根据配置设置日志详细度（config 理论上已通过 Schema 校验，此处加防护)
+  pluginLogLevel = ({ debug: '详细', info: '中等', warn: '简洁' }[config?.logLevel ?? 'info'] ?? '中等') as '详细' | '中等' | '简洁'
+  // debug 模式需要把 Koishi logger 的输出阈值提升到 3（debug），否则 [D] 被框架过滤
+  if (pluginLogLevel === '详细') logger.level = 3
   
   // 记录插件启动信息
-  logger.info('群组验证插件已启动')
-  logger.info(`默认提醒消息: ${config.defaultReminderMessage}`)
-  logger.info(`严格群号检查: ${config.enableStrictGroupCheck ? '启用' : '禁用'}`)
-  logger.info(`日志级别: ${config.logLevel}`)
+  clog('info', '群组验证插件已启动')
+  clog('info', `默认提醒消息: ${config.defaultReminderMessage}`)
+  clog('info', `严格群号检查: ${config.enableStrictGroupCheck ? '启用' : '禁用'}`)
+  clog('info', `日志详细度: ${config.logLevel ?? '中等'}`)
 
   ctx.model.extend('group_verification_stats', {
     id: 'unsigned',
@@ -1166,7 +1200,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 监听 guild-member-request 事件，以便对新申请执行自动审批或拒绝
   ctx.on('guild-member-request', async (session) => {
-    logger.debug('收到 guild-member-request 事件，转发给处理函数')
+    clog('debug', '收到 guild-member-request 事件，转发给处理函数')
     await handleGuildMemberRequestEvent(ctx, session)
   })
 
@@ -1174,42 +1208,19 @@ export function apply(ctx: Context, config: Config) {
   ctx.on('guild-member-added', async (session: any) => {
     const groupId = session.guildId || ''
     const userId = session.userId || ''
-    if (!groupId || !userId) {
-      // 无效会话，忽略
-      return
-    }
+    if (!groupId || !userId) return
 
-    // 无论什么情况只要检测到加入就累加总入群
+    // 始终增加总入群计数（四列统计相互独立）
     await incrementTotal(ctx, groupId)
 
-    // 先检查 autoQueue
-    const set = autoQueue.get(groupId)
-    if (set && set.has(userId)) {
-      await updateStats(ctx, groupId, 'autoApproved')
-      set.delete(userId)
-      logger.info(`用户 ${userId} 通过机器人审批加入群 ${groupId}（autoQueue），统计已更新`)
-      return
+    // 清理 autoQueue 中的缓存（统计已在自动批准时记录）
+    const autoSet = autoQueue.get(groupId)
+    if (autoSet && autoSet.has(userId)) {
+      autoSet.delete(userId)
     }
 
-    // 检查是否有待审核记录
-    const pendingRecords = await ctx.database.get('group_verification_pending', {
-      groupId: groupId,
-      userId: userId
-    })
-
-    if (pendingRecords.length > 0) {
-      // 通过验证的用户入群，更新统计
-      await updateStats(ctx, groupId, 'autoApproved')
-      // 清除所有该用户的待审核记录
-      for (const rec of pendingRecords) {
-        await ctx.database.remove('group_verification_pending', { id: rec.id })
-      }
-      logger.info(`用户 ${userId} 通过验证加入群 ${groupId}，已清理 ${pendingRecords.length} 条待审核记录，统计已更新`)
-    } else {
-      // 手动邀请入群，记录到手动批准统计
-      await updateStats(ctx, groupId, 'manuallyApproved')
-      logger.info(`用户 ${userId} 被手动邀请加入群 ${groupId}，手动批准统计已更新`)
-    }
+    // 清理残留的待审核记录（QQ 群管页面直接放行时 pending 记录不会被 gva 删除）
+    await ctx.database.remove('group_verification_pending', { groupId, userId })
   })
 
 
@@ -1225,62 +1236,55 @@ export function apply(ctx: Context, config: Config) {
       return [false, config.invalidGroupMessage || '请在群聊中使用此命令或使用 -i 参数指定群号']
     }
     
-    // 使用Koishi logger输出调试信息
-    logger.debug(`权限检查 - 用户ID: ${session.userId}, 群号: ${groupId}`)
-    
     // 检查koishi权限等级（最高优先级）
     const koishiAuthority = session.author?.authority || session.user?.authority
-    logger.debug(`权限检查 - Koishi权限等级: ${koishiAuthority || '未获取到'}`)
-    
-    // 尝试其他可能的权限字段
+    clogV(`权限检查 - 用户ID: ${session.userId}, 群号: ${groupId}`)
+    clogV(`权限检查 - Koishi权限等级: ${koishiAuthority || '未获取到'}`)
     if (!session.author) {
-      logger.debug(`权限检查 - session中可能的权限字段:`, {
+      clogV(`权限检查 - session中可能的权限字段:`, {
         authority: session.authority,
         permission: session.permission,
         role: session.role
       })
     } else {
-      // 检查author对象中的其他权限字段
-      logger.debug(`权限检查 - author对象中的字段:`, {
+      clogV(`权限检查 - author对象中的字段:`, {
         authority: session.author.authority,
         permission: session.author.permission,
         role: session.author.role,
         permissions: session.author.permissions
       })
     }
-    
-    // 尝试从user对象获取权限信息
     if (session.user) {
-      logger.debug(`权限检查 - user对象中的权限信息:`, {
+      clogV(`权限检查 - user对象中的权限信息:`, {
         authority: session.user.authority,
         permission: session.user.permission,
         role: session.user.role
       })
     }
-    
-    // 先检查koishi权限等级（最高优先级）
     if (koishiAuthority && koishiAuthority >= 3) {
-      logger.debug(`权限检查 - 通过koishi权限检查: ${koishiAuthority}`)
+      clogV(`权限检查 - 通过koishi权限检查: ${koishiAuthority}`)
+      clog('debug', `权限通过(koishi): uid=${session.userId} authority=${koishiAuthority}`)
       return [true]
     }
     
     // 再检查是否为群主或管理员（次优先级）
     try {
       const member = await session.bot.getGuildMember(groupId, session.userId)
-      logger.debug(`权限检查 - 获取到成员信息:`, {
+      clogV(`权限检查 - 获取到成员信息:`, {
         roles: member?.roles,
         permissions: member?.permissions
       })
-      
       if (member) {
         // 检查群主权限
         if (member.permissions?.includes('OWNER') || member.roles?.includes('owner')) {
-          logger.debug(`权限检查 - 用户是群主`)
+          clogV(`权限检查 - 用户是群主`)
+          clog('debug', `权限通过(群主): uid=${session.userId}`)
           return [true]
         }
         // 检查管理员权限
         if (member.roles?.includes('admin') || member.permissions?.includes('ADMINISTRATOR')) {
-          logger.debug(`权限检查 - 用户是管理员`)
+          clogV(`权限检查 - 用户是管理员`)
+          clog('debug', `权限通过(管理员): uid=${session.userId}`)
           return [true]
         }
       }
@@ -1289,9 +1293,8 @@ export function apply(ctx: Context, config: Config) {
       return [false, `无法获取群 ${groupId} 的成员信息，请确认机器人已在该群中`]
     }
     
-    logger.debug(`权限检查 - 权限不足`)
-    const debugInfo = `调试信息 - 用户ID:${session.userId}, 群号:${groupId}, 权限等级:${koishiAuthority || '未知'}`
-    return [false, (config.permissionDeniedMessage || '权限不足: 需要群主/管理员权限或koishi三级以上权限') + `\n${debugInfo}`]
+    clogV(`权限检查 - 权限不足`)
+    return [false, config.permissionDeniedMessage || '权限不足: 需要群主/管理员权限或koishi三级以上权限']
   }
 
   // 创建主命令及别名
@@ -1314,13 +1317,14 @@ export function apply(ctx: Context, config: Config) {
     .option('query', '-? 查询当前配置')
     .option('remove', '-r 删除配置')
     .action(async ({ session, options }: any, keywords: any) => {
-      // 详细调试: 记录所有输入信息
-      logger.debug(`=== 命令解析调试 ===`)
-      logger.debug(`session内容: guildId=${session.guildId}, userId=${session.userId}`)
-
+      // 详细模式复现 1.0.35 的三行解析调试块
+      clogV(`=== 命令解析调试 ===`)
+      clogV(`session内容: guildId=${session.guildId}, userId=${session.userId}`)
       // 重新计算原始参数字符串（去掉命令本身）
       const rawInput = session.content.split(/\s+/).slice(1).join(' ')
-      logger.debug(`原始命令参数: "${rawInput}"`)
+      clogV(`原始命令参数: "${rawInput}"`)
+      // 中等模式下输出简洁行
+      if (pluginLogLevel !== '详细') clog('debug', `gvc: uid=${session.userId} guild=${session.guildId} args="${rawInput}"`)
 
       // 使用自定义解析函数提取关键词和 flags
       const parsed = parseConfigArgs(rawInput)
@@ -1331,7 +1335,7 @@ export function apply(ctx: Context, config: Config) {
         return parseError
       }
       
-      logger.debug(`解析结果 flags=${JSON.stringify(flags)}, keywords=[${parsedKeywords.join(', ')}]`)
+      clog('debug', `解析结果 flags=${JSON.stringify(flags)}, keywords=[${parsedKeywords.join(', ')}]`)
 
       // 由 flags 和 Koishi options 合并最终选项
       const cleanedOptions = {
@@ -1344,7 +1348,8 @@ export function apply(ctx: Context, config: Config) {
         query: flags.query || options.query,
         remove: flags.remove || options.remove,
       }
-      logger.debug(`合并后options: ${JSON.stringify(cleanedOptions, null, 2)}`)
+      clogV(`合并后options: ${JSON.stringify(cleanedOptions, null, 2)}
+`)
 
       // 检查 -? 和 -r 的独占性；允许与 -i 并存
       if ((cleanedOptions.query || cleanedOptions.remove) &&
@@ -1417,7 +1422,7 @@ export function apply(ctx: Context, config: Config) {
         const existingConfig = await ctx.database.get('group_verification_config', { groupId: targetGroupId })
         if (existingConfig.length > 0) {
           await ctx.database.remove('group_verification_config', { id: existingConfig[0].id })
-          logger.info(`配置删除 - 用户ID:${session.userId}, 群号:${targetGroupId}`)
+          clog('info', `配置删除 - 用户ID:${session.userId}, 群号:${targetGroupId}`)
           return `已删除群 ${targetGroupId} 的验证配置`
         } else {
           return `群 ${targetGroupId} 无验证配置`
@@ -1481,8 +1486,7 @@ export function apply(ctx: Context, config: Config) {
       
       // 关键词列表由之前解析得到的 parsedKeywords 构成
       let keywordList: string[] = parsedKeywords.slice()
-
-      logger.debug(`关键词解析结果: [${keywordList.join(', ')}] - 原始输入: "${rawInput}"`)
+      clogV(`关键词解析结果: [${keywordList.join(', ')}] - 原始输入: "${rawInput}"`)
 
       // 如果没有关键词且不是查询/删除操作，则根据现有配置或报错
       if (keywordList.length === 0 && !cleanedOptions.query && !cleanedOptions.remove) {
@@ -1536,7 +1540,7 @@ export function apply(ctx: Context, config: Config) {
             existingConfig.reviewParameters === null || 
             isNaN(existingConfig.reviewParameters)) {
           reviewParameters = 0  // 默认值
-          logger.debug(`检测到老版本数据或无效值，使用默认阈值: 0`)
+          clog('debug', `检测到老版本数据或无效值，使用默认阈值: 0`)
         } else {
           reviewParameters = existingConfig.reviewParameters
         }
@@ -1550,10 +1554,10 @@ export function apply(ctx: Context, config: Config) {
         }
         const oldMethod = reviewMethod
         reviewMethod = methodNum as 0 | 1 | 2 | 3
-        logger.debug(`审核方式明确指定为: ${reviewMethod}`)
+        clog('debug', `审核方式明确指定为: ${reviewMethod}`)
         var methodChanged = oldMethod !== reviewMethod
       } else {
-        logger.debug(`未指定审核方式，保持原有值: ${reviewMethod}`)
+        clog('debug', `未指定审核方式，保持原有值: ${reviewMethod}`)
         var methodChanged = false
       }
 
@@ -1577,7 +1581,7 @@ export function apply(ctx: Context, config: Config) {
           updatedBy: session.username || session.userId,
           updatedAt: new Date().toISOString()
         })
-        logger.debug(`自动调整并更新数据库阈值为: ${reviewParameters}`)
+        clog('debug', `自动调整并更新数据库阈值为: ${reviewParameters}`)
       }
 
       // 自动调整说明，用于反馈消息
@@ -1599,8 +1603,6 @@ export function apply(ctx: Context, config: Config) {
         return keyword.replace(/,/g, '[[COMMA]]')
       })
       
-      logger.debug(`编码后准备存储的关键词: ${JSON.stringify(encodedKeywords)}`)
-      
       // 保存配置到数据库（使用新的简单格式）
       const dbData = {
         keywords: encodedKeywords,
@@ -1618,7 +1620,7 @@ export function apply(ctx: Context, config: Config) {
           ...dbData,
           updatedAt: new Date().toISOString(),
         })
-        logger.info(`更新配置成功 - 审核方式: ${reviewMethod}, 阈值: ${reviewParameters}`)
+        clog('info', `更新配置成功 - 审核方式: ${reviewMethod}, 阈值: ${reviewParameters}`)
       } else {
         await ctx.database.create('group_verification_config', {
           groupId: targetGroupId,
@@ -1626,7 +1628,7 @@ export function apply(ctx: Context, config: Config) {
           createdBy: session.username || session.userId,
           createdAt: new Date().toISOString()
         })
-        logger.info(`创建配置成功 - 审核方式: ${reviewMethod}, 阈值: ${reviewParameters}`)
+        clog('info', `创建配置成功 - 审核方式: ${reviewMethod}, 阈值: ${reviewParameters}`)
       }
       
       // 读取时解码关键词（修复更新显示中的关键词显示问题）
@@ -1657,25 +1659,7 @@ export function apply(ctx: Context, config: Config) {
       }
       
       
-      // 同时更新数据库存储时也要确保正确格式
-      logger.debug(`准备存储到数据库的关键词: ${JSON.stringify(encodedKeywords)}`)
-      
-      // 添加详细的处理日志
-      logger.debug(`=== 配置处理详情 ===`)
-      logger.debug(`原始输入: ${keywords || '无关键词'}`)
-      logger.debug(`审核方式: ${reviewMethod} (${['全部同意','按数量','按比例','全部拒绝'][reviewMethod]})`)
-      logger.debug(`阈值参数: ${JSON.stringify(reviewParameters)}`)
-      logger.debug(`关键词列表: [${keywordList.map(k => `"${k}"`).join(', ')}]`)
-      logger.debug(`现有配置: ${existingConfig ? '存在' : '不存在'}`)
-      if (existingConfig) {
-        logger.debug(`原审核方式: ${existingConfig.reviewMethod}`)
-        logger.debug(`原阈值: ${JSON.stringify(existingConfig.reviewParameters)}`)
-        logger.debug(`原关键词数: ${existingConfig.keywords.length}`)
-        logger.debug(`新关键词数: ${keywordList.length}`)
-      }
-      logger.debug(`==================`)
-      
-      logger.info(feedbackMessage.replace(/\n/g, '; '))
+      clog('info', feedbackMessage.replace(/\n/g, '; '))
       return feedbackMessage
     })
 
@@ -1719,6 +1703,7 @@ export function apply(ctx: Context, config: Config) {
             if (request.requestId) {
               try {
                 await session.bot.handleGuildMemberRequest(request.requestId, true)
+                await updateStats(ctx, groupId, 'manuallyApproved')
                 approvedCount++
               } catch (error: any) {
                 logger.warn(`处理申请 ${request.id} 时出错:`, error)
@@ -1750,6 +1735,7 @@ export function apply(ctx: Context, config: Config) {
             session.bot.handleGuildMemberRequest(request.requestId, true).catch((e:any) => logger.warn('自动同意失败', e))
             // 清除该用户的所有待审核记录（异步也可以，顺序无关）
             await ctx.database.remove('group_verification_pending', { groupId, userId: request.userId })
+            await updateStats(ctx, groupId, 'manuallyApproved')
             return reply
           } catch (error: any) {
             return `处理申请时出错: ${error.message}`
@@ -1776,6 +1762,7 @@ export function apply(ctx: Context, config: Config) {
         const reply = `已同意用户 ${displayName} 的加群申请`
         session.bot.handleGuildMemberRequest(request.requestId, true).catch((e:any) => logger.warn('自动同意失败', e))
         await ctx.database.remove('group_verification_pending', { groupId, userId })
+        await updateStats(ctx, groupId, 'manuallyApproved')
         return reply
       } catch (error: any) {
         return `处理申请时出错: ${error.message}`
@@ -2090,7 +2077,7 @@ export function apply(ctx: Context, config: Config) {
           await ctx.database.set('group_verification_pending', { id: p.id }, updates)
         }
       }
-      logger.info('旧版日期字段迁移完成')
+      clog('info', '旧版日期字段迁移完成')
     } catch (e) {
       logger.warn('迁移旧日期字段时出错', e)
     }
@@ -2107,9 +2094,9 @@ export function apply(ctx: Context, config: Config) {
         rejected: 0,
         lastUpdated: new Date().toISOString()
       })
-      logger.info('已创建总计统计行')
+      clog('info', '已创建总计统计行')
     } else {
-      logger.info('总计统计行已存在')
+      clog('info', '总计统计行已存在')
     }
     
     // 同步现有统计数据到总计行
