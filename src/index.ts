@@ -46,7 +46,7 @@ export interface GroupVerificationStats {
 export interface GroupBlacklistEntry {
   id: number
   groupId: string   // 群号或 "all" 表示全局
-  entries: Record<string, string> // key=userId, value=reason
+  entries: Record<string, string> // key=userId, value=原因
 }
 
 
@@ -81,7 +81,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   defaultReminderMessage: Schema.string()
     .description('默认提醒消息模板（使用 \\n 表示换行，可包含下方变量）')
-    .default('{user}({id}) 申请加入群 {gname}({group})\n申请理由: {question}\n匹配情况: {answer}/{threshold}\n使用 gva 同意或 gvr 拒绝申请'),
+    .default('{user}({id}) 申请入群\\n申请理由: {question}\\n匹配情况: {answer}/{threshold}\\n使用 gva 同意或 gvr 拒绝申请'),
   enableStrictGroupCheck: Schema.boolean().description('是否启用严格的群号检查（检查群号长度）').default(false),
   logLevel: Schema.union(['debug', 'info', 'warn', 'error']).description('日志级别').default('info'),
   permissionDeniedMessage: Schema.string().description('权限不足时返回给调用者的提示').default('权限不足: 需要群主/管理员权限或koishi三级以上权限'),
@@ -296,7 +296,7 @@ export function mergeReminder(
 ) {
   let reminderEnabled = true;
   // 优先使用传入的默认模板，其次使用已有配置，再 fallback 到老写死的样式
-  let reminderMessage = defaultMessage || '{user}({id}) 申请加入群 {gname}({group})\n申请理由: {question}\n匹配情况: {answer}/{threshold}';
+  let reminderMessage = defaultMessage || '{user}({id}) 申请入群\\n申请理由: {question}\\n匹配情况: {answer}/{threshold}\\n使用 gva 同意或 gvr 拒绝申请';
 
   if (existingConfig) {
     reminderEnabled = existingConfig.reminderEnabled;
@@ -314,7 +314,8 @@ export function mergeReminder(
   } else if (hasRealMessageParam) {
     reminderEnabled = true;
     if (cleanedOptions.message !== undefined) {
-      reminderMessage = cleanedOptions.message.replace(/\\n/g, '\n');
+      // 直接存储原始内容（\n 作为换行占位符，渲染时再转换）
+      reminderMessage = cleanedOptions.message;
       logger.debug(`设置自定义提醒消息: ${reminderMessage.substring(0, 50)}...`);
     }
   }
@@ -331,7 +332,7 @@ export function mergeReminder(
 const autoQueue = new Map<string, Set<string>>();
 
 // 更新统计信息函数，提取到模块层供多个位置调用
-// synchronize overall statistics across groups
+// 同步所有群组的统计
 export async function syncTotalStats(ctx: Context) {
   try {
     // 获取所有群组统计（排除TOTAL行）
@@ -409,9 +410,8 @@ export async function incrementTotal(ctx: Context, groupId: string) {
   await syncTotalStats(ctx)
 }
 
-// 根据已有配置、关键词列表及用户输入确定阈值参数的辅助函数，
-// 并处理审核方式更改所致的自动调整
-// and whether the audit method has been changed by the command.
+// 根据已有配置、关键词列表及用户输入确定最终阈值参数，
+// 同时处理审核方式变更导致的自动阈值调整。
 export interface ThresholdResult {
   reviewParameters: number
   error?: string
@@ -430,7 +430,7 @@ export function resolveThreshold(
     reviewParameters = existingConfig.reviewParameters || 0
     if (isNaN(reviewParameters)) reviewParameters = 0
   }
-  // explicit threshold provided by user
+  // 用户明确提供了阈值
   if (thresholdStr !== undefined) {
     const thresholdNum = parseInt(thresholdStr)
     if (isNaN(thresholdNum)) {
@@ -447,7 +447,7 @@ export function resolveThreshold(
     }
     return { reviewParameters: thresholdNum }
   }
-  // no threshold specified by user
+  // 用户未指定阈值
   if (methodChanged) {
     if (reviewMethod === 1) {
       reviewParameters = keywordList.length
@@ -511,17 +511,17 @@ export async function checkPermission(session: any, targetGroupId?: string): Pro
   
   try {
     const member = await session.bot.getGuildMember(groupId, session.userId)
-    logger.info(`权限检查 - 获取到成员信息:`, {
+    logger.debug(`权限检查 - 获取到成员信息:`, {
       roles: member?.roles,
       permissions: member?.permissions
     })
     if (member) {
       if (member.permissions?.includes('OWNER') || member.roles?.includes('owner')) {
-        logger.info(`权限检查 - 用户是群主`)
+        logger.debug(`权限检查 - 用户是群主`)
         return [true]
       }
       if (member.roles?.includes('admin') || member.permissions?.includes('ADMINISTRATOR')) {
-        logger.info(`权限检查 - 用户是管理员`)
+        logger.debug(`权限检查 - 用户是管理员`)
         return [true]
       }
     }
@@ -619,8 +619,9 @@ export function parseConfigArgs(raw: string): ParsedArgs {
   }
 
   // 将哨兵占位符还原为真实字符
+  // ESC_BACKSLASH 还原为两个反斜杠，使 \\n 与 \n 可被渲染管线区分
   tokens = tokens.map(t =>
-    t.replace(new RegExp(ESC_QUOTE, 'g'), '"').replace(new RegExp(ESC_BACKSLASH, 'g'), '\\')
+    t.replace(new RegExp(ESC_QUOTE, 'g'), '"').replace(new RegExp(ESC_BACKSLASH, 'g'), '\\\\')
   );
 
   for (let i = 0; i < tokens.length; i++) {
@@ -644,11 +645,11 @@ export function parseConfigArgs(raw: string): ParsedArgs {
         return { keywords: [], flags, error: '参数 -t 需要指定阈值' };
       }
     } else if (tok === '-msg') {
-      // gather all tokens after -msg up to next flag
+      // 收集 -msg 后直到下一个标志之前的所有令牌
       const clusters: string[][] = [];
       let j = i + 1;
       while (j < tokens.length && !isFlag(tokens[j])) {
-        // start a new comma-cluster
+        // 开始新的逗号簇
         const cluster: string[] = [tokens[j]];
         while (j < tokens.length - 1 && seps[j] === ',') {
           j++;
@@ -657,22 +658,21 @@ export function parseConfigArgs(raw: string): ParsedArgs {
         clusters.push(cluster);
         j++;
       }
-      // advance outer index to skip consumed tokens
+      // 将外层索引向前推进，跳过已消耗的令牌
       i = j - 1;
 
       if (clusters.length === 0) {
         flags.enableMessage = true;
       } else {
-        // first cluster is always message
+        // 第一个簇先作为消息内容
         const msgCluster = clusters[0];
         flags.message = msgCluster.join(',');
-        // remaining clusters become keywords if any
+        // 剩余簇转为关键词
         if (clusters.length > 1) {
-          // flatten subsequent clusters into keywords and push back into main loop
+          // 展开后续簇中的关键词，直接向 keywords 数组推入
           for (let k = 1; k < clusters.length; k++) {
             const kws = clusters[k];
-            // create artificial tokens for these keywords; they will be
-            // appended by the outer `else keywords.push(tok)` section
+            // 逐个向 keywords 数组添加（外层 else 分支将涉及的令牌推入）
             for (const kw of kws) {
               keywords.push(kw);
             }
@@ -690,7 +690,7 @@ export function parseConfigArgs(raw: string): ParsedArgs {
     }
   }
 
-  // remove everything from the first flag onward, including when flag sits at start
+  // 去採第一个标志之前的关键词部分（包括标志在头的情况）
   const keywordSection = raw.split(/(?:^|\s+)-(?:i|m|t|msg|nomsg|\?|r)\b/)[0].trim();
   if (keywordSection && !validateKeywordFormat(keywordSection)) {
     error = '关键词应使用逗号分隔或引号框起（如: k1,k2,k3 或 "k1","k2" 或 "k1,k2",k3）';
@@ -721,7 +721,7 @@ export async function verifyApplication(config: GroupVerificationConfig, message
       break
     case 1: // 按数量同意
       {
-        // threshold may legitimately be 0 (表示全部同意)
+        // 阈值也可以为 0（表示全部同意）
         const thresholdNum = config.reviewParameters !== undefined && config.reviewParameters !== null
           ? config.reviewParameters
           : 0
@@ -809,8 +809,11 @@ export async function handleFailedVerification(
     return
   }
 
-  // 替换提醒消息中的变量
+  // 将 \n 占位符转换为实际换行（\\n 表示字面量 \n，不换行）
   let reminderMsg = config.reminderMessage
+    .replace(/\\\\n/g, '\x01')
+    .replace(/\\n/g, '\n')
+    .replace(/\x01/g, '\\n')
   reminderMsg = reminderMsg
     .replace(/{user}/g, username)
     .replace(/{id}/g, userId)
@@ -827,13 +830,13 @@ export async function handleFailedVerification(
   const channel = rawChannel || guildId
   const target: string | [string, string] = rawChannel ? [channel, guildId] : guildId
   logger.debug('broadcast target', { channel, guildId, target })
-  // prefer using bot.broadcast since ctx.broadcast may not support tuple
+  // 优先使用 bot.broadcast，ctx.broadcast 可能不支持元组格式
   if (session.bot && typeof session.bot.broadcast === 'function') {
     try {
       await session.bot.broadcast([target], reminderMsg as any)
     } catch (err) {
-      // fallback to ctx.broadcast if bot.broadcast fails for some reason
-      logger.warn('bot.broadcast failed, fallback to ctx.broadcast', err)
+      // bot.broadcast 失败时回退到 ctx.broadcast
+      logger.warn('bot.broadcast 失败，回退到 ctx.broadcast', err)
       if (typeof (ctx.broadcast) === 'function') {
         await (ctx.broadcast as any)([target], reminderMsg)
       } else {
@@ -873,7 +876,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
   const parts = rawArgs.trim().split(/\s+/).filter(Boolean)
   const op = parts[0]?.toLowerCase()
   if (!op || !['a','r','l','i'].includes(op)) {
-    // present a multiline Chinese usage guide without angle brackets
+    // 展示多行中文用法说明
     return [
       '用法: ',
       '  gvb a id [reason] [group]   将用户加入黑名单',
@@ -892,7 +895,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
   if (op === 'a') {
     targetUser = parts[1]
     if (!targetUser) return '请提供用户ID'
-    // handle optional reason and group at end
+    // 处理可选的原因和群号参数
     // 规则: 如果只有一个附加参数，则作为 reason；两个及以上时最后一个为群号，其余拼成 reason
     const rest = parts.slice(2)
     if (rest.length === 1) {
@@ -923,9 +926,9 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       const [ok, err] = await checkPermission(session, group)
       if (!ok) return err || '权限不足'
     }
-    // add entry to map with timestamp, but refuse duplicates
+    // 将条目加入映射，带时间前缀，拒绝重复添加
     const rows = await ctx.database.get('group_verification_blacklist', { groupId: group })
-    // build stored reason with current time prefix
+    // 构建带时间前缀的存储原因
     const timePrefix = new Date().toLocaleString()
     const storedReason = reason ? `${timePrefix} ${reason}` : timePrefix
     if (rows.length > 0) {
@@ -1032,7 +1035,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       return tmpl.replace('{global}', globalHit ? '有' : '无').replace('{group}', localHit ? '有' : '无')
     }
 
-    // no group specified -> use current session guild
+    // 未指定群号，使用当前群聊群号
     if (!groupArg) {
       const groupId = getCurrentGroup()
       if (!groupId) return '请在群聊中使用此命令'
@@ -1044,7 +1047,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       return `全局黑名单: ${globalReason || '无'}\n群${groupId}黑名单: ${localReason || '无'}`
     }
 
-    // groupArg provided
+    // 已指定群号参数
     if (groupArg.toLowerCase() === 'all') {
       const auth = session.author?.authority || session.user?.authority
       if (!(auth && auth >= 3)) return '权限不足: 查看全局/所有群黑名单需要 koishi 3 级以上权限'
@@ -1067,7 +1070,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       return reply
     }
 
-    // specific group provided
+    // 指定了具体群号
     const groupId = groupArg
     if (config?.enableStrictGroupCheck && groupId.toLowerCase() !== 'all') {
       if (!/^\d{5,15}$/.test(groupId)) {
@@ -1124,15 +1127,15 @@ export function apply(ctx: Context, config: Config) {
     manuallyApproved: 'integer',
     rejected: 'integer',
     totalJoined: 'integer',
-    // store as string (ISO timestamp) to preserve full date+time;
-    // Koishi `date` type truncates to day which leads to 00:00:00.
+    // 以字符串（ISO 时间戳）格式存储，保留完整日期+时间；
+    // Koishi 的 date 类型会截断到天，导致时间显示为 00:00:00。
     lastUpdated: 'string'
   }, {
     primary: 'id',
     autoInc: true
   })
 
-  // cast schema to any to avoid type conflicts when adding new fields
+  // 类型断言为 any，避免新增字段时与 Koishi 类型冲突
   ctx.model.extend('group_verification_pending', {
     id: 'unsigned',
     groupId: 'string',
@@ -1141,7 +1144,7 @@ export function apply(ctx: Context, config: Config) {
     requestMessage: 'string',
     // 保存 OneBot 事件提供的原始 requestId；用于同意/拒绝操作
     requestId: 'string',
-    // record full timestamp as string to keep time component
+    // 以字符串格式记录完整时间戳，保留时间分量
     applyTime: 'string'
   } as any, {
     primary: 'id',
@@ -1163,7 +1166,7 @@ export function apply(ctx: Context, config: Config) {
 
   // 监听 guild-member-request 事件，以便对新申请执行自动审批或拒绝
   ctx.on('guild-member-request', async (session) => {
-    logger.info('收到 guild-member-request 事件，转发给处理函数')
+    logger.debug('收到 guild-member-request 事件，转发给处理函数')
     await handleGuildMemberRequestEvent(ctx, session)
   })
 
@@ -1272,7 +1275,7 @@ export function apply(ctx: Context, config: Config) {
       if (member) {
         // 检查群主权限
         if (member.permissions?.includes('OWNER') || member.roles?.includes('owner')) {
-          logger.info(`权限检查 - 用户是群主`)
+          logger.debug(`权限检查 - 用户是群主`)
           return [true]
         }
         // 检查管理员权限
@@ -1291,11 +1294,11 @@ export function apply(ctx: Context, config: Config) {
     return [false, (config.permissionDeniedMessage || '权限不足: 需要群主/管理员权限或koishi三级以上权限') + `\n${debugInfo}`]
   }
 
-  // Create main command with aliases
+  // 创建主命令及别名
   const groupVerify = ctx.command('group-verify', '群组验证管理命令')
     .alias('gv', 'gverify')
 
-  // Subcommand: configure group verification
+  // 子命令：配置群组验证规则
   groupVerify
     .subcommand('.config [keywords:text]', '配置群组验证规则')
     .alias(
@@ -1312,12 +1315,12 @@ export function apply(ctx: Context, config: Config) {
     .option('remove', '-r 删除配置')
     .action(async ({ session, options }: any, keywords: any) => {
       // 详细调试: 记录所有输入信息
-      logger.info(`=== 命令解析调试 ===`)
-      logger.info(`session内容: guildId=${session.guildId}, userId=${session.userId}`)
+      logger.debug(`=== 命令解析调试 ===`)
+      logger.debug(`session内容: guildId=${session.guildId}, userId=${session.userId}`)
 
-      // recompute raw argument string (去掉命令本身)
+      // 重新计算原始参数字符串（去掉命令本身）
       const rawInput = session.content.split(/\s+/).slice(1).join(' ')
-      logger.info(`原始命令参数: "${rawInput}"`)
+      logger.debug(`原始命令参数: "${rawInput}"`)
 
       // 使用自定义解析函数提取关键词和 flags
       const parsed = parseConfigArgs(rawInput)
@@ -1328,7 +1331,7 @@ export function apply(ctx: Context, config: Config) {
         return parseError
       }
       
-      logger.info(`解析结果 flags=${JSON.stringify(flags)}, keywords=[${parsedKeywords.join(', ')}]`)
+      logger.debug(`解析结果 flags=${JSON.stringify(flags)}, keywords=[${parsedKeywords.join(', ')}]`)
 
       // 由 flags 和 Koishi options 合并最终选项
       const cleanedOptions = {
@@ -1341,7 +1344,7 @@ export function apply(ctx: Context, config: Config) {
         query: flags.query || options.query,
         remove: flags.remove || options.remove,
       }
-      logger.info(`合并后options: ${JSON.stringify(cleanedOptions, null, 2)}`)
+      logger.debug(`合并后options: ${JSON.stringify(cleanedOptions, null, 2)}`)
 
       // 检查 -? 和 -r 的独占性；允许与 -i 并存
       if ((cleanedOptions.query || cleanedOptions.remove) &&
@@ -1457,12 +1460,16 @@ export function apply(ctx: Context, config: Config) {
           const updateTime = new Date(config.updatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
           const reminderStatus = config.reminderEnabled ? '启用' : '禁用'
           
+          const displayMsg = (config.reminderMessage || '无')
+            .replace(/\\\\n/g, '\x01')
+            .replace(/\\n/g, '\n')
+            .replace(/\x01/g, '\\n')
           return `群 ${targetGroupId} 配置: 
 关键词: ${decodedKeywords.join(', ')}
 审核方式: ${methodDesc}
 阈值: ${thresholdInfo}
 提醒消息: ${reminderStatus}
-自定义消息:\n${config.reminderMessage || '无'}
+自定义消息:\n${displayMsg}
 创建时间: ${createTime}
 更新时间: ${updateTime}
 创建者: ${config.createdBy}
@@ -1475,7 +1482,7 @@ export function apply(ctx: Context, config: Config) {
       // 关键词列表由之前解析得到的 parsedKeywords 构成
       let keywordList: string[] = parsedKeywords.slice()
 
-      logger.info(`关键词解析结果: [${keywordList.join(', ')}] - 原始输入: "${rawInput}"`)
+      logger.debug(`关键词解析结果: [${keywordList.join(', ')}] - 原始输入: "${rawInput}"`)
 
       // 如果没有关键词且不是查询/删除操作，则根据现有配置或报错
       if (keywordList.length === 0 && !cleanedOptions.query && !cleanedOptions.remove) {
@@ -1529,7 +1536,7 @@ export function apply(ctx: Context, config: Config) {
             existingConfig.reviewParameters === null || 
             isNaN(existingConfig.reviewParameters)) {
           reviewParameters = 0  // 默认值
-          logger.info(`检测到老版本数据或无效值，使用默认阈值: 0`)
+          logger.debug(`检测到老版本数据或无效值，使用默认阈值: 0`)
         } else {
           reviewParameters = existingConfig.reviewParameters
         }
@@ -1592,7 +1599,7 @@ export function apply(ctx: Context, config: Config) {
         return keyword.replace(/,/g, '[[COMMA]]')
       })
       
-      logger.info(`编码后准备存储的关键词: ${JSON.stringify(encodedKeywords)}`)
+      logger.debug(`编码后准备存储的关键词: ${JSON.stringify(encodedKeywords)}`)
       
       // 保存配置到数据库（使用新的简单格式）
       const dbData = {
@@ -1606,7 +1613,7 @@ export function apply(ctx: Context, config: Config) {
       }
       
       if (existingConfig) {
-        // ensure timestamp strings for compatibility
+        // 确保时间戳字符串格式居宿层兼容
         await ctx.database.set('group_verification_config', { id: existingConfig.id }, {
           ...dbData,
           updatedAt: new Date().toISOString(),
@@ -1643,34 +1650,36 @@ export function apply(ctx: Context, config: Config) {
       
       feedbackMessage += `提醒状态: ${reminderEnabled ? '启用' : '禁用'}\n`
       if (reminderMessage && reminderEnabled) {
-        // show full message on its own lines so users can see everything
-        feedbackMessage += `提醒消息:\n${reminderMessage}\n`
+        // 展示完整提醒消息，方便用户确认
+        const displayReminder = reminderMessage
+          .replace(/\\\\n/g, '\x01').replace(/\\n/g, '\n').replace(/\x01/g, '\\n')
+        feedbackMessage += `提醒消息:\n${displayReminder}\n`
       }
       
       
       // 同时更新数据库存储时也要确保正确格式
-      logger.info(`准备存储到数据库的关键词: ${JSON.stringify(encodedKeywords)}`)
+      logger.debug(`准备存储到数据库的关键词: ${JSON.stringify(encodedKeywords)}`)
       
       // 添加详细的处理日志
-      logger.info(`=== 配置处理详情 ===`)
-      logger.info(`原始输入: ${keywords || '无关键词'}`)
-      logger.info(`审核方式: ${reviewMethod} (${['全部同意','按数量','按比例','全部拒绝'][reviewMethod]})`)
-      logger.info(`阈值参数: ${JSON.stringify(reviewParameters)}`)
-      logger.info(`关键词列表: [${keywordList.map(k => `"${k}"`).join(', ')}]`)
-      logger.info(`现有配置: ${existingConfig ? '存在' : '不存在'}`)
+      logger.debug(`=== 配置处理详情 ===`)
+      logger.debug(`原始输入: ${keywords || '无关键词'}`)
+      logger.debug(`审核方式: ${reviewMethod} (${['全部同意','按数量','按比例','全部拒绝'][reviewMethod]})`)
+      logger.debug(`阈值参数: ${JSON.stringify(reviewParameters)}`)
+      logger.debug(`关键词列表: [${keywordList.map(k => `"${k}"`).join(', ')}]`)
+      logger.debug(`现有配置: ${existingConfig ? '存在' : '不存在'}`)
       if (existingConfig) {
-        logger.info(`原审核方式: ${existingConfig.reviewMethod}`)
-        logger.info(`原阈值: ${JSON.stringify(existingConfig.reviewParameters)}`)
-        logger.info(`原关键词数: ${existingConfig.keywords.length}`)
-        logger.info(`新关键词数: ${keywordList.length}`)
+        logger.debug(`原审核方式: ${existingConfig.reviewMethod}`)
+        logger.debug(`原阈值: ${JSON.stringify(existingConfig.reviewParameters)}`)
+        logger.debug(`原关键词数: ${existingConfig.keywords.length}`)
+        logger.debug(`新关键词数: ${keywordList.length}`)
       }
-      logger.info(`==================`)
+      logger.debug(`==================`)
       
       logger.info(feedbackMessage.replace(/\n/g, '; '))
       return feedbackMessage
     })
 
-  // Subcommand: approve join request
+  // 子命令：同意入群申请
   groupVerify
     .subcommand('.approve [userId]', '同意加群申请')
     .alias(
@@ -1773,7 +1782,7 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  // Subcommand: reject join request
+  // 子命令：拒绝入群申请
   groupVerify
     .subcommand('.reject [userId]', '拒绝加群申请')
     .alias(
@@ -1871,7 +1880,7 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  // Subcommand: view statistics
+  // 子命令：查看统计信息
   groupVerify
     .subcommand('.stats [target]', '查看群组验证统计信息')
     .alias(
@@ -1921,7 +1930,7 @@ export function apply(ctx: Context, config: Config) {
       return '参数错误'
     })
 
-  // Subcommand: view pending requests
+  // 子命令：查看待审核申请列表
   groupVerify
     .subcommand('.pending', '查看待审核加群申请')
     .alias(
@@ -1954,7 +1963,7 @@ export function apply(ctx: Context, config: Config) {
       return result
     })
 
-  // Subcommand: blacklist management
+  // 子命令：黑名单管理
   groupVerify
     .subcommand('.blacklist [args:text]', '管理加群黑名单')
     .alias(
@@ -1966,7 +1975,7 @@ export function apply(ctx: Context, config: Config) {
       return await processBlacklistCommand(ctx, session, args || '', config)
     })
 
-  // Subcommand: help information
+  // 子命令：帮助信息
   groupVerify
     .subcommand('.help', '显示帮助信息')
     .alias('gv.帮助', 'gverify.帮助', 'group-verify.帮助', '帮助', 'hlp', '帮助信息')
@@ -2065,7 +2074,7 @@ export function apply(ctx: Context, config: Config) {
       for (const st of stats) {
         const updates: any = {}
         if (st.lastUpdated instanceof Date) updates.lastUpdated = st.lastUpdated.toISOString()
-        // add missing totalJoined column default 0
+        // 补充缺失的 totalJoined 列，默认为 0
         if (st.totalJoined === undefined) updates.totalJoined = 0
         if (Object.keys(updates).length) {
           await ctx.database.set('group_verification_stats', { id: st.id }, updates)
@@ -2075,7 +2084,7 @@ export function apply(ctx: Context, config: Config) {
       for (const p of pendings) {
         const updates: any = {}
         if (p.applyTime instanceof Date) updates.applyTime = p.applyTime.toISOString()
-        // add default empty requestId if record pre-dates the new column
+        // 补充缺失的 requestId 列，默认为空字符串
         if (p.requestId === undefined) updates.requestId = ''
         if (Object.keys(updates).length) {
           await ctx.database.set('group_verification_pending', { id: p.id }, updates)

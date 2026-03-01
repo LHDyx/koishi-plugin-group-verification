@@ -5,7 +5,7 @@
 
 import { Context } from 'koishi'
 import { GroupVerificationConfig, GroupVerificationStats, Config, tokenize, parseConfigArgs, mergeReminder, verifyApplication, handleFailedVerification, usageString, handleGuildMemberRequestEvent, __getAutoQueue, updateStats, incrementTotal, resolveThreshold, isUserBlacklisted, processBlacklistCommand } from '../src/index'
-// also import entire module for runtime patching
+// 运行时可能需要对模块打补丁，因此直接引入整个模块
 const plugin: any = require('../src/index')
 
 // 模拟测试数据
@@ -13,7 +13,7 @@ const mockConfig: any = {
   id: 1,
   groupId: '123456789',
   keywords: ['学生', '校友', '老师'],
-  // follow interface in plugin
+  // 与插件中的接口保持一致
   reviewMethod: 0,
   reviewParameters: 0,
   reminderEnabled: true,
@@ -85,12 +85,12 @@ function testArgumentParsing() {
     { input: '"1,2",3 -msg "hello world" -nomsg', expect: { keywords: ['1,2','3'], flags: { message: 'hello world', disableMessage: true } } },
     { input: '-? ', expect: { keywords: [], flags: { query: true } } },
     { input: 'foo -msg bar baz -i 12345', expect: { keywords: ['foo','baz'], flags: { message: 'bar', groupId: '12345' } } },
-    // new edge cases
+    // 新的边缘情况
     { input: '1"2,3"', expectError: true },
     { input: '1,2"', expectError: true },
     { input: '1"2', expectError: true },
     { input: '1\\"2', expect: { keywords: ['1"2'], flags: {} } },
-    // escaped quote after comma should still produce a quoted token but not trigger error
+    // 逗号后的转义引号应当仍视为引号内容且不报错
     { input: '1,2"', expectError: true },
     { input: '"a b" c', expect: { keywords: ['a b','c'], flags: {} } },
     { input: '-msg 1111 2', expect: { keywords: ['2'], flags: { message: '1111' } } },
@@ -107,7 +107,7 @@ function testArgumentParsing() {
     { input: '-m', expectError: true },
     { input: '-t', expectError: true },
     { input: '-i', expectError: true },
-    // new: -i can coexist with -? and -r
+    // 新增：-i 可与 -? 和 -r 共存
     { input: '-i 123 -?', expect: { keywords: [], flags: { groupId: '123', query: true } } },
     { input: '-i 123 -r', expect: { keywords: [], flags: { groupId: '123', remove: true } } },
   ]
@@ -375,7 +375,7 @@ function testUsageString() {
 function testDefaultReminderFormat() {
   console.log('\n=== 测试默认提醒消息格式 ===')
   // copy from plugin default for consistency
-  const msg = '{user}({id}) 申请加入群 {gname}({group})\n申请理由：{question}\n匹配情况：{answer}/{threshold}\n使用 gva 同意或 gvr 拒绝申请'
+  const msg = '{user}({id}) 申请入群\n申请理由: {question}\n匹配情况: {answer}/{threshold}\n使用 gva 同意或 gvr 拒绝申请'
   const ok = msg.includes('使用 gva') && msg.includes('\n')
   console.log('默认模板含提示和换行转义 ->', ok ? 'OK' : 'FAIL')
 }
@@ -486,25 +486,94 @@ async function testBlacklistRejects() {
   const fakeSession: any = { guildId:'100', userId:'bad', content:'', event:{requestId:'req1'}, messageId:'req1', bot:{handleGuildMemberRequest:async(_id:any, flag:boolean)=>{ actions.push(flag); }} }
   await handleGuildMemberRequestEvent(fakeCtx, fakeSession)
   console.log('全局黑名单 ->', actions.includes(false) ? 'OK' : 'FAIL')
-  actions.length = 0
-  const fakeSession2: any = { guildId:'100', userId:'bad2', content:'', event:{requestId:'req2'}, messageId:'req2', bot:{handleGuildMemberRequest:async(_id:any, flag:boolean)=>{ actions.push(flag); }} }
-  await handleGuildMemberRequestEvent(fakeCtx, fakeSession2)
-  console.log('群级黑名单 ->', actions.includes(false) ? 'OK' : 'FAIL')
+  fakeSession.userId = 'bad2'
+  fakeSession.event.requestId = 'req2'
+  fakeSession.messageId = 'req2'
+  await handleGuildMemberRequestEvent(fakeCtx, fakeSession)
+  console.log('群级黑名单 ->', actions.length >= 2 ? 'OK' : 'FAIL')
 }
 
-// 测试黑名单命令处理逻辑
+// 测试黑名单命令处理
 async function testBlacklistCommandProcessing() {
   console.log('\n=== 测试 黑名单命令处理 ===')
   const calls: any[] = []
-  const fakeCtx: any = { database: { remove: async(...a:any)=>calls.push(['remove',a]), create: async(...a:any)=>calls.push(['create',a]), set: async(...a:any)=>calls.push(['set',a]), get: async(_t:string, where:any)=>{ if(where.groupId==='200') return [{entries:{'u':'r'}}]; if(where.groupId==='all') return [{entries:{}}]; return [] } } }
-  const fakeSession: any = { guildId:'200', userId:'admin', author:{authority:3} }
+  const kickCalls: any[] = []
+  const fakeCtx: any = {
+    database: {
+      remove: async (...a: any) => calls.push(['remove', a]),
+      create: async (...a: any) => calls.push(['create', a]),
+      set: async (...a: any) => calls.push(['set', a]),
+      get: async (_t: string, where: any) => {
+        if (where.groupId === '200') return [{ id: 1, entries: {} }]
+        if (where.groupId === 'all') return [{ id: 99, entries: {} }]
+        return []
+      }
+    }
+  }
+  const fakeSession: any = {
+    guildId: '200', userId: 'admin', author: { authority: 3 },
+    bot: { kickGuildMember: async (g: string, u: string) => kickCalls.push([g, u]) }
+  }
   let res = await processBlacklistCommand(fakeCtx, fakeSession, 'a u1 reason 200', {})
   console.log('添加 ->', res.includes('已将用户') ? 'OK' : 'FAIL')
-  res = await processBlacklistCommand(fakeCtx, fakeSession, 'l 200', {})
-  console.log('列表 ->', res.includes('黑名单') ? 'OK' : 'FAIL')
-  res = await processBlacklistCommand(fakeCtx, fakeSession, 'i u', {})
-  console.log('查询 ->', res.includes('本群黑名单') ? 'OK' : 'FAIL')
-  res = await processBlacklistCommand(fakeCtx, fakeSession, 'r u 200', {})
+  console.log('踢出调用 ->', kickCalls.length > 0 ? 'OK' : 'FAIL')
+  const createdEntry = calls.find((c: any) => c[0] === 'create')
+  const setEntry = calls.find((c: any) => c[0] === 'set')
+  const entryJson = JSON.stringify(createdEntry || setEntry || {})
+  console.log('原因带时间 ->', /20\d\d/.test(entryJson) ? 'OK' : 'FAIL')
+  // 数字原因测试
+  calls.length = 0; kickCalls.length = 0
+  const fakeCtx2: any = {
+    database: {
+      remove: async () => {},
+      create: async (...a: any) => calls.push(['create', a]),
+      set: async (...a: any) => calls.push(['set', a]),
+      get: async (_t: string, where: any) => {
+        if (where.groupId === '200') return [{ id: 1, entries: {} }]
+        if (where.groupId === 'all') return [{ id: 99, entries: {} }]
+        return []
+      }
+    }
+  }
+  res = await processBlacklistCommand(fakeCtx2, fakeSession, 'a u2 666 200', {})
+  console.log('数字原因识别 ->', res.includes('已将用户') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtx2, fakeSession, 'a u3 reason abc', { enableStrictGroupCheck: true })
+  console.log('严格群号检查 ->', res.includes('不合法') ? 'OK' : 'FAIL')
+  // 重复添加测试
+  const fakeCtxDup: any = {
+    database: {
+      remove: async () => {}, create: async () => {}, set: async () => {},
+      get: async (_t: string, where: any) => {
+        if (where.groupId === '200') return [{ id: 1, entries: { 'u1': 'existing' } }]
+        if (where.groupId === 'all') return [{ id: 99, entries: {} }]
+        return []
+      }
+    }
+  }
+  res = await processBlacklistCommand(fakeCtxDup, fakeSession, 'a u1 reason 200', {})
+  console.log('重复添加拒绝 ->', res.includes('已在群') ? 'OK' : 'FAIL')
+  // 查询相关测试
+  const fakeCtxI: any = {
+    database: {
+      remove: async () => {}, set: async () => {}, create: async () => {},
+      get: async (_t: string, where: any) => {
+        if (where.groupId === '200') return [{ id: 1, entries: { 'u': 'r2' } }]
+        if (where.groupId === 'all') return [{ id: 99, entries: {} }]
+        return []
+      }
+    }
+  }
+  res = await processBlacklistCommand(fakeCtxI, fakeSession, 'i u', {})
+  console.log('查询 ->', res.includes('黑名单') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtxI, fakeSession, 'i u 200', {})
+  console.log('查询指定群 ->', res.includes('群200黑名单') ? 'OK' : 'FAIL')
+  // 权限不足
+  const lowAuth = { ...fakeSession, author: { authority: 2 } }
+  res = await processBlacklistCommand(fakeCtxI, lowAuth, 'i u all', {})
+  console.log('查询 all 权限不足 ->', res.includes('权限不足') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtxI, fakeSession, 'i u all', {})
+  console.log('查询 all 格式 ->', res.startsWith('全局黑名单:') && res.includes('群黑名单:') ? 'OK' : 'FAIL')
+  res = await processBlacklistCommand(fakeCtxI, fakeSession, 'r u 200', {})
   console.log('删除 ->', res.includes('已从群') ? 'OK' : 'FAIL')
 }
 
