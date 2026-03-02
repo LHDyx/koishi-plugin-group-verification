@@ -609,17 +609,61 @@ export async function handleGuildMemberRequestEvent(ctx: Context, session: any) 
     logger.warn('黑名单检查失败', e);
   }
 
-  // 解析用户昵称优先级：1) API拉取昵称 2) session.username（若非userId） 3) userId
+  // 解析用户昵称优先级：
+  // 1) session.author.user.name  — Koishi GuildMember.user.name（官方标准字段）
+  // 2) session.author.name / .nick — 群昵称
+  // 3) event 原始 user 字段
+  // 4) session.username（若非 userId）
+  // 5) getGuildMember() API（申请人尚未入群，通常失败）→ getUser() API
+  // 6) 最终 fallback：userId
   {
+    const isId = (s: string | undefined) => !s || s === userId
+
     let resolvedName: string | undefined
-    try {
-      const userInfo = await session.bot.getUser(userId)
-      if (userInfo?.name) resolvedName = userInfo.name
-    } catch (_) {}
-    if (!resolvedName && session.username && session.username !== userId) {
+
+    // 优先级1：GuildMember.user.name — OneBot 适配器将申请人 User 对象放在 author.user
+    const authorUser = (session.author as any)?.user
+    if (!isId(authorUser?.name)) resolvedName = authorUser.name
+    else if (!isId(authorUser?.nick)) resolvedName = authorUser.nick
+
+    // 优先级2：author 自身的 name/nick（群昵称）
+    if (!resolvedName) {
+      const author = session.author as any
+      if (!isId(author?.name))      resolvedName = author.name
+      else if (!isId(author?.nick)) resolvedName = author.nick
+    }
+
+    // 优先级3：event 原始 user 字段
+    if (!resolvedName) {
+      const evUser = (session.event as any)?.user
+      if (!isId(evUser?.name))      resolvedName = evUser?.name
+      else if (!isId(evUser?.nick)) resolvedName = evUser?.nick
+    }
+
+    // 优先级4：session.username
+    if (!resolvedName && !isId(session.username)) {
       resolvedName = session.username
     }
+
+    // 优先级5：API 拉取
+    if (!resolvedName) {
+      try {
+        // 先尝试 getGuildMember（申请人未入群时会 throw，正常）
+        const member = await session.bot.getGuildMember(guildId, userId)
+        const n = member?.user?.name || member?.name || (member as any)?.nick
+        if (!isId(n)) resolvedName = n
+      } catch (_) {}
+    }
+    if (!resolvedName) {
+      try {
+        const userInfo = await session.bot.getUser(userId)
+        const n = (userInfo as any)?.name || (userInfo as any)?.nickname
+        if (!isId(n)) resolvedName = n
+      } catch (_) {}
+    }
+
     session.username = resolvedName || userId
+    clogV(`昵称解析: userId=${userId} resolved="${session.username}" authorUser=${JSON.stringify(authorUser)} author=${JSON.stringify((session as any).author)} event.user=${JSON.stringify((session.event as any)?.user)}`)
   }
 
   const { isValid, matchedCount, requiredThreshold } = await verifyApplication(config, message, session);
