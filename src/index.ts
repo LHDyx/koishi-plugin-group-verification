@@ -35,6 +35,11 @@ function clogV(msg: string, ...args: any[]): void {
   if (pluginLogLevel === '详细') logger.debug(msg, ...args)
 }
 
+/** 处理配置文本中的换行转义：\n→换行，\\n→字面量 \n */
+function renderMsg(tmpl: string): string {
+  return tmpl.replace(/\\\\n/g, '\x01').replace(/\\n/g, '\n').replace(/\x01/g, '\\n')
+}
+
 // 数据库模型定义
 declare module 'koishi' {
   interface Tables {
@@ -114,14 +119,14 @@ export const Config: Schema<Config> = Schema.object({
     .default('{user}({id}) 申请入群\\n申请理由: {question}\\n匹配情况: {answer}/{threshold}\\n使用 gva 同意或 gvr 拒绝申请'),
   enableStrictGroupCheck: Schema.boolean().description('是否启用严格的群号检查（检查群号长度）').default(false),
   logLevel: Schema.union(['debug', 'info', 'warn']).description('日志详细程度').default('info'),  // debug=详细, info=中等, warn=简洁
-  permissionDeniedMessage: Schema.string().description('权限不足时返回给调用者的提示').default('权限不足: 需要群主/管理员权限或koishi三级以上权限'),
-  invalidGroupMessage: Schema.string().description('无效群号或机器人未在该群时的提示').default('群号 {group} 格式不合法或机器人不在该群中'),
-  parameterConflictMessage: Schema.string().description('参数冲突时提示').default('参数冲突: -? 或 -r 不能与其他参数或关键词一起使用（仅可搭配 -i）'),
-  noKeywordsMessage: Schema.string().description('未提供关键词且无法从现有配置继承时的提示').default('请先提供关键词创建配置，或使用 -? 查询配置，-r 删除配置'),
-  blacklistAddSuccess: Schema.string().description('将用户加入黑名单后的提示，可使用 {user},{group},{reason}').default('已将用户 {user} 加入群 {group} 黑名单{reason}'),
-  blacklistRemoveSuccess: Schema.string().description('从黑名单移除用户后的提示，可使用 {user},{group}').default('已从群 {group} 的黑名单中移除用户 {user}'),
-  blacklistListEmpty: Schema.string().description('黑名单为空时提示').default('群 {group} 的黑名单为空'),
-  blacklistInfoTemplate: Schema.string().description('查询指定用户状态时的模板，可用 {global},{group}').default('全局黑名单: {global}\n本群黑名单: {group}')
+  permissionDeniedMessage: Schema.string().description('权限不足时返回给调用者的提示，支持 \\n 换行').default('权限不足: 需要群主/管理员权限或koishi三级以上权限'),
+  invalidGroupMessage: Schema.string().description('无效群号或机器人未在该群时的提示，可用 {group}，支持 \\n 换行').default('群号 {group} 格式不合法或机器人不在该群中'),
+  parameterConflictMessage: Schema.string().description('参数冲突时提示，支持 \\n 换行').default('参数冲突: -? 或 -r 不能与其他参数或关键词一起使用（仅可搭配 -i）'),
+  noKeywordsMessage: Schema.string().description('未提供关键词且无法从现有配置继承时的提示，支持 \\n 换行').default('请先提供关键词创建配置，或使用 -? 查询配置，-r 删除配置'),
+  blacklistAddSuccess: Schema.string().description('将用户加入黑名单后的提示，可用 {user},{group},{reason}；{group} 含"群"前缀（all时为"全局"），支持 \\n 换行').default('已将用户 {user} 加入{group}黑名单{reason}'),
+  blacklistRemoveSuccess: Schema.string().description('从黑名单移除用户后的提示，可用 {user},{group}；{group} 含"群"前缀，支持 \\n 换行').default('已从{group}的黑名单中移除用户 {user}'),
+  blacklistListEmpty: Schema.string().description('黑名单为空时提示，可用 {group}；{group} 含"群"前缀，支持 \\n 换行').default('{group}的黑名单为空'),
+  blacklistInfoTemplate: Schema.string().description('查询指定用户状态时的模板，可用 {global},{group}，支持 \\n 换行').default('全局黑名单: {global}\\n本群黑名单: {group}')
 })
   .description('群组验证插件配置')
 
@@ -604,6 +609,19 @@ export async function handleGuildMemberRequestEvent(ctx: Context, session: any) 
     logger.warn('黑名单检查失败', e);
   }
 
+  // 解析用户昵称优先级：1) API拉取昵称 2) session.username（若非userId） 3) userId
+  {
+    let resolvedName: string | undefined
+    try {
+      const userInfo = await session.bot.getUser(userId)
+      if (userInfo?.name) resolvedName = userInfo.name
+    } catch (_) {}
+    if (!resolvedName && session.username && session.username !== userId) {
+      resolvedName = session.username
+    }
+    session.username = resolvedName || userId
+  }
+
   const { isValid, matchedCount, requiredThreshold } = await verifyApplication(config, message, session);
   clogV(`验证结果 guild=${guildId} user=${userId} msg="${message}" matched=${matchedCount} threshold=${requiredThreshold} valid=${isValid}`);
 
@@ -803,7 +821,7 @@ export async function handleFailedVerification(
     logger.warn('handleFailedVerification invoked without guildId, aborting')
     return
   }
-  const username = session.username || '未知用户'
+  const username = session.username || userId
   const message = session.content || ''
   clog('debug', `待审核: guild=${guildId} user=${userId} matched=${matchedCount}/${requiredThreshold}`,
     `处理失败验证 guild=${guildId} user=${userId} msg="${session.content || ''}" matched=${matchedCount} threshold=${requiredThreshold}`)
@@ -955,7 +973,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       // 严格群号检查（若开启）
       if (config?.enableStrictGroupCheck) {
         if (!/^\d{5,15}$/.test(group)) {
-          return (config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group)
+          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
         }
       }
       const [ok, err] = await checkPermission(session, group)
@@ -988,8 +1006,9 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
         logger.warn(`踢出用户 ${targetUser} 失败`, e)
       }
     }
-    const tmpl = (config && config.blacklistAddSuccess) || '已将用户 {user} 加入群 {group} 黑名单{reason}'
-    return tmpl.replace('{user}', targetUser).replace('{group}', group).replace('{reason}', reason ? `，原因: ${reason}` : '')
+    const tmpl = (config && config.blacklistAddSuccess) || '已将用户 {user} 加入{group}黑名单{reason}'
+    const groupLabelA = group.toLowerCase() === 'all' ? '全局' : '群 ' + group
+    return renderMsg(tmpl.replace('{user}', targetUser).replace('{group}', groupLabelA).replace('{reason}', reason ? `，原因: ${reason}` : ''))
   }
   if (op === 'r') {
     targetUser = parts[1]
@@ -1002,7 +1021,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     } else {
       if (config?.enableStrictGroupCheck) {
         if (!/^\d{5,15}$/.test(group)) {
-          return (config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group)
+          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
         }
       }
       const [ok, err] = await checkPermission(session, group)
@@ -1015,8 +1034,9 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       delete entries[targetUser]
       await ctx.database.set('group_verification_blacklist', { id: row.id }, { entries })
     }
-    const tmpl = (config && config.blacklistRemoveSuccess) || '已从群 {group} 的黑名单中移除用户 {user}'
-    return tmpl.replace('{user}', targetUser).replace('{group}', group)
+    const tmpl = (config && config.blacklistRemoveSuccess) || '已从{group}的黑名单中移除用户 {user}'
+    const groupLabelR = group.toLowerCase() === 'all' ? '全局' : '群 ' + group
+    return renderMsg(tmpl.replace('{user}', targetUser).replace('{group}', groupLabelR))
   }
   if (op === 'l') {
     group = parts[1] || getCurrentGroup()
@@ -1027,7 +1047,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     } else {
       if (config?.enableStrictGroupCheck) {
         if (!/^\d{5,15}$/.test(group)) {
-          return (config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group)
+          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
         }
       }
       const [ok, err] = await checkPermission(session, group)
@@ -1035,13 +1055,9 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     }
     const rows = await ctx.database.get('group_verification_blacklist', { groupId: group })
     if (rows.length === 0) {
-      // 特殊处理 all 表示全局黑名单
-      if (group && group.toLowerCase() === 'all') {
-        // 不使用模板，因为默认模板会产生 "群 all 的黑名单为空" 这种奇怪输出
-        return '全局黑名单为空'
-      }
-      const tmpl = (config && config.blacklistListEmpty) || '群 {group} 的黑名单为空'
-      return tmpl.replace('{group}', group)
+      const tmpl = (config && config.blacklistListEmpty) || '{group}的黑名单为空'
+      const groupLabelL = group && group.toLowerCase() === 'all' ? '全局' : '群 ' + group
+      return renderMsg(tmpl.replace('{group}', groupLabelL))
     }
     const entries = rows[0].entries || {}
     // 构造列表消息，all 也是专用前缀
@@ -1060,7 +1076,8 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     const globalHit = globalRows.length > 0 && (globalRows[0].entries || {})[targetUser] !== undefined
 
     // 使用模板格式化回复的辅助函数
-    const tmpl = (config && config.blacklistInfoTemplate) || '全局黑名单: {global}\n本群黑名单: {group}'
+    const tmpl = ((config && config.blacklistInfoTemplate) || '全局黑名单: {global}\\n本群黑名单: {group}')
+      .replace(/\\\\n/g, '\x01').replace(/\\n/g, '\n').replace(/\x01/g, '\\n')
     const formatReply = (localHit: boolean, groupsList?: string[]) => {
       if (groupsList) {
         return tmpl.replace('{global}', globalHit ? '有' : '无').replace(
@@ -1109,7 +1126,7 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     const groupId = groupArg
     if (config?.enableStrictGroupCheck && groupId.toLowerCase() !== 'all') {
       if (!/^\d{5,15}$/.test(groupId)) {
-        return (config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', groupId)
+        return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', groupId))
       }
     }
     const [ok, err] = await checkPermission(session, groupId)
@@ -1294,7 +1311,7 @@ export function apply(ctx: Context, config: Config) {
     }
     
     clogV(`权限检查 - 权限不足`)
-    return [false, config.permissionDeniedMessage || '权限不足: 需要群主/管理员权限或koishi三级以上权限']
+    return [false, renderMsg(config.permissionDeniedMessage || '权限不足: 需要群主/管理员权限或koishi三级以上权限')]
   }
 
   // 创建主命令及别名
@@ -1355,7 +1372,7 @@ export function apply(ctx: Context, config: Config) {
       if ((cleanedOptions.query || cleanedOptions.remove) &&
           (parsedKeywords.length > 0 || cleanedOptions.method !== undefined || cleanedOptions.threshold !== undefined ||
            cleanedOptions.message !== undefined || cleanedOptions.enableMessage || cleanedOptions.disableMessage)) {
-        return config.parameterConflictMessage || '参数冲突: -? 或 -r 不能与其他参数或关键词一起使用（仅可搭配 -i）'
+        return renderMsg(config.parameterConflictMessage || '参数冲突: -? 或 -r 不能与其他参数或关键词一起使用（仅可搭配 -i）')
       }
 
       // 检查消息参数冲突
@@ -1511,7 +1528,7 @@ export function apply(ctx: Context, config: Config) {
       // 处理关键词: 如果没有关键词但有其他参数，从现有配置中获取
       if (keywordList.length === 0 && !cleanedOptions.query && !cleanedOptions.remove) {
         if (!existingConfig) {
-          return config.noKeywordsMessage || '请先提供关键词创建配置，或使用 -? 查询配置，-r 删除配置'
+          return renderMsg(config.noKeywordsMessage || '请先提供关键词创建配置，或使用 -? 查询配置，-r 删除配置')
         }
         keywordList = existingConfig.keywords
       }

@@ -8,7 +8,7 @@
   "bugs": {
     "url": "https://github.com/LHDyx/koishi-plugin-group-verification/issues"
   },
-  "version": "1.0.35",
+  "version": "1.0.37",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
