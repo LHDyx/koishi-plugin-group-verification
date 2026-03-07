@@ -1014,11 +1014,13 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       const auth = session.author?.authority || session.user?.authority
       if (!(auth && auth >= 3)) return '设置全局黑名单需要 koishi 3 级以上权限'
     } else {
-      // 严格群号检查（若开启）
-      if (config?.enableStrictGroupCheck) {
-        if (!/^\d{5,15}$/.test(group)) {
-          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
-        }
+      // 纯数字为基础要求（不依赖 enableStrictGroupCheck）
+      if (!/^\d+$/.test(group)) {
+        return renderMsg((config?.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
+      }
+      // enableStrictGroupCheck 额外控制长度 5-15 位
+      if (config?.enableStrictGroupCheck && !/^\d{5,15}$/.test(group)) {
+        return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
       }
       const [ok, err] = await checkPermission(session, group)
       if (!ok) return err || '权限不足'
@@ -1050,9 +1052,14 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
         logger.warn(`踢出用户 ${targetUser} 失败`, e)
       }
     }
+    // 严格模式：操作已完成，检查机器人是否在群（仅警告不阻止）
+    let aWarn = ''
+    if (config?.enableStrictGroupCheck && group.toLowerCase() !== 'all' && session.bot && typeof session.bot.getGuild === 'function') {
+      try { await session.bot.getGuild(group) } catch { aWarn = `⚠️ 机器人可能不在群 ${group} 中，操作仍已执行\n` }
+    }
     const tmpl = (config && config.blacklistAddSuccess) || '已将用户 {user} 加入{group}黑名单{reason}'
     const groupLabelA = group.toLowerCase() === 'all' ? '全局' : '群 ' + group
-    return renderMsg(tmpl.replace('{user}', targetUser).replace('{group}', groupLabelA).replace('{reason}', reason ? `，原因: ${reason}` : ''))
+    return aWarn + renderMsg(tmpl.replace('{user}', targetUser).replace('{group}', groupLabelA).replace('{reason}', reason ? `，原因: ${reason}` : ''))
   }
   if (op === 'r') {
     targetUser = parts[1]
@@ -1063,10 +1070,13 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       const auth = session.author?.authority || session.user?.authority
       if (!(auth && auth >= 3)) return '修改全局黑名单需要 koishi 3 级以上权限'
     } else {
-      if (config?.enableStrictGroupCheck) {
-        if (!/^\d{5,15}$/.test(group)) {
-          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
-        }
+      // 纯数字为基础要求（不依赖 enableStrictGroupCheck）
+      if (!/^\d+$/.test(group)) {
+        return renderMsg((config?.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
+      }
+      // enableStrictGroupCheck 额外控制长度 5-15 位
+      if (config?.enableStrictGroupCheck && !/^\d{5,15}$/.test(group)) {
+        return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
       }
       const [ok, err] = await checkPermission(session, group)
       if (!ok) return err || '权限不足'
@@ -1078,9 +1088,14 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       delete entries[targetUser]
       await ctx.database.set('group_verification_blacklist', { id: row.id }, { entries })
     }
+    // 严格模式：操作已完成，检查机器人是否在群（仅警告不阻止）
+    let rWarn = ''
+    if (config?.enableStrictGroupCheck && group.toLowerCase() !== 'all' && session.bot && typeof session.bot.getGuild === 'function') {
+      try { await session.bot.getGuild(group) } catch { rWarn = `⚠️ 机器人可能不在群 ${group} 中，操作仍已执行\n` }
+    }
     const tmpl = (config && config.blacklistRemoveSuccess) || '已从{group}的黑名单中移除用户 {user}'
     const groupLabelR = group.toLowerCase() === 'all' ? '全局' : '群 ' + group
-    return renderMsg(tmpl.replace('{user}', targetUser).replace('{group}', groupLabelR))
+    return rWarn + renderMsg(tmpl.replace('{user}', targetUser).replace('{group}', groupLabelR))
   }
   if (op === 'l') {
     group = parts[1] || getCurrentGroup()
@@ -1089,10 +1104,13 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
       const auth = session.author?.authority || session.user?.authority
       if (!(auth && auth >= 3)) return '查看全局黑名单需要 koishi 3 级以上权限'
     } else {
-      if (config?.enableStrictGroupCheck) {
-        if (!/^\d{5,15}$/.test(group)) {
-          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
-        }
+      // 纯数字为基础要求（不依赖 enableStrictGroupCheck）
+      if (!/^\d+$/.test(group)) {
+        return renderMsg((config?.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
+      }
+      // enableStrictGroupCheck 额外控制长度 5-15 位
+      if (config?.enableStrictGroupCheck && !/^\d{5,15}$/.test(group)) {
+        return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', group))
       }
       const [ok, err] = await checkPermission(session, group)
       if (!ok) return err || '权限不足'
@@ -1110,7 +1128,12 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
     for (const uid in entries) {
       msg += `${uid}${entries[uid] ? `: ${entries[uid]}` : ''}\n`
     }
-    return msg
+    // 严格模式：查询已完成，检查机器人是否在群（仅警告不阻止）
+    let lWarn = ''
+    if (config?.enableStrictGroupCheck && group.toLowerCase() !== 'all' && session.bot && typeof session.bot.getGuild === 'function') {
+      try { await session.bot.getGuild(group) } catch { lWarn = `⚠️ 机器人可能不在群 ${group} 中\n` }
+    }
+    return lWarn + msg
   }
   if (op === 'i') {
     targetUser = parts[1]
@@ -1168,17 +1191,25 @@ export async function processBlacklistCommand(ctx: Context, session: any, rawArg
 
     // 指定了具体群号
     const groupId = groupArg
-    if (config?.enableStrictGroupCheck && groupId.toLowerCase() !== 'all') {
-      if (!/^\d{5,15}$/.test(groupId)) {
-        return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', groupId))
-      }
+    // 纯数字为基础要求（不依赖 enableStrictGroupCheck）
+    if (!/^\d+$/.test(groupId)) {
+      return renderMsg((config?.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', groupId))
+    }
+    // enableStrictGroupCheck 额外控制长度 5-15 位
+    if (config?.enableStrictGroupCheck && !/^\d{5,15}$/.test(groupId)) {
+      return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', groupId))
     }
     const [ok, err] = await checkPermission(session, groupId)
     if (!ok) return err || '权限不足'
     const rows = await ctx.database.get('group_verification_blacklist', { groupId })
     const localReason = rows.length > 0 ? (rows[0].entries || {})[targetUser] : undefined
     const globalReason = globalHit ? globalRows[0].entries[targetUser] : undefined
-    return `全局黑名单: ${globalReason || '无'}\n群${groupId}黑名单: ${localReason || '无'}`
+    // 严格模式：查询已完成，检查机器人是否在群（仅警告不阻止）
+    let iWarn = ''
+    if (config?.enableStrictGroupCheck && session.bot && typeof session.bot.getGuild === 'function') {
+      try { await session.bot.getGuild(groupId) } catch { iWarn = `⚠️ 机器人可能不在群 ${groupId} 中\n` }
+    }
+    return iWarn + `全局黑名单: ${globalReason || '无'}\n群${groupId}黑名单: ${localReason || '无'}`
   }
   return ''
 }
@@ -1425,27 +1456,33 @@ export function apply(ctx: Context, config: Config) {
       const hasRealDisableMessageParam = cleanedOptions.disableMessage !== undefined
       
       const targetGroupId = cleanedOptions.groupId || session.guildId
+      let gvcBotWarn = ''
        
       // 权限检查（先检查群号有效性）
       if (targetGroupId) {
-        // 群号合法性检查（只在用户明确指定-i参数时检查）
-        if (config.enableStrictGroupCheck && cleanedOptions.groupId) {
-          if (targetGroupId.length < 5 || targetGroupId.length > 15) {
-            return `群号 ${targetGroupId} 格式不合法（长度应在5-15位之间）`
+        // 群号合法性检查（只在用户明确指定 -i 参数时检查）
+        if (cleanedOptions.groupId) {
+          // 纯数字为基础要求（不依赖 enableStrictGroupCheck）
+          if (!/^\d+$/.test(targetGroupId)) {
+            return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', targetGroupId))
+          }
+          // enableStrictGroupCheck 额外控制长度 5-15 位
+          if (config.enableStrictGroupCheck && !/^\d{5,15}$/.test(targetGroupId)) {
+            return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', targetGroupId))
+          }
+          // 严格模式：检查机器人是否在群，失败仅警告不阻止配置保存
+          if (config.enableStrictGroupCheck && session.bot && typeof session.bot.getGuild === 'function') {
+            try {
+              await session.bot.getGuild(targetGroupId)
+            } catch {
+              gvcBotWarn = `⚠️ 机器人可能不在群 ${targetGroupId} 中，配置已保存但可能无法生效\n`
+            }
           }
         }
-        
-        try {
-          // 检查机器人是否在目标群中（必须检查）
-          await session.bot.getGuild(targetGroupId)
-          
-          // 检查用户权限
-          const [hasPermission, errorMsg] = await checkPermission(session, targetGroupId)
-          if (!hasPermission) {
-            return errorMsg || '权限不足'
-          }
-        } catch (error) {
-          return `群号 ${targetGroupId} 无效或机器人不在该群中`
+        // 权限检查（独立于 getGuild，避免误捕获权限错误）
+        const [hasPermission, errorMsg] = await checkPermission(session, targetGroupId)
+        if (!hasPermission) {
+          return errorMsg || '权限不足'
         }
       } else {
         return '请在群聊中使用此命令或指定群号(-i参数)'
@@ -1721,28 +1758,67 @@ export function apply(ctx: Context, config: Config) {
       
       
       clog('info', feedbackMessage.replace(/\n/g, '; '))
-      return feedbackMessage
+      return gvcBotWarn + feedbackMessage
     })
 
   // 子命令：同意入群申请
   groupVerify
-    .subcommand('.approve [userId]', '同意加群申请')
+    .subcommand('.approve', '同意加群申请')
     .alias(
       'gv.accept', 'gverify.accept', 'group-verify.accept',
       'gv.同意', 'gverify.同意', 'group-verify.同意',
       'gva'
     )
-    .action(async ({ session }: any, userId: any) => {
-      // 权限检查
-      const [hasPermission, errorMsg] = await checkPermission(session)
+    .action(async ({ session }: any) => {
+      // ── 参数解析（直接读 session.content，绕过 Koishi 将 '-数字' 当作选项吞掉的问题）──
+      // 格式: gva [id|all] [group]，最多两段；第一段只能是纯正整数或 all，第二段只能是纯数字
+      const parts = (session.content || '').trim().split(/\s+/).slice(1).filter(Boolean)
+      if (parts.length > 2) {
+        return '参数过多，用法: gva [id|all] [group]'
+      }
+      const rawUserId  = parts[0]   // 可能为 undefined（不传等同于处理最近一条）
+      const rawGroupId = parts[1]   // 可选群号
+
+      // 第一段（若有）只能是纯正整数或 all（不允许负数或非数字字符）
+      if (rawUserId && !/^\d+$/.test(rawUserId) && rawUserId.toLowerCase() !== 'all') {
+        return '参数错误，用法: gva [id|all] [group]\n第一个参数只能是用户 ID（纯正整数）或 all'
+      }
+
+      // ── 确定目标群号 ──────────────────────────────────────
+      const effectiveGroupId = rawGroupId || session.guildId
+      if (!effectiveGroupId) {
+        return '请在群聊中使用此命令或指定群号: gva [id|all] [group]'
+      }
+
+      // 群号校验：纯数字为基础要求（不依赖 enableStrictGroupCheck，不允许 all 或含字母）
+      // enableStrictGroupCheck 额外控制长度 5-15 位与在群检查（失败则阻止执行）
+      if (rawGroupId) {
+        if (!/^\d+$/.test(rawGroupId)) {
+          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', rawGroupId))
+        }
+        if (config?.enableStrictGroupCheck) {
+          if (!/^\d{5,15}$/.test(rawGroupId)) {
+            return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', rawGroupId))
+          }
+          // 严格模式：检查机器人是否在目标群，不在则阻止执行
+          if (session.bot && typeof session.bot.getGuild === 'function') {
+            try {
+              await session.bot.getGuild(rawGroupId)
+            } catch {
+              return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', rawGroupId))
+            }
+          }
+        }
+      }
+
+      // ── 权限检查 ──────────────────────────────────────────
+      const [hasPermission, errorMsg] = await checkPermission(session, effectiveGroupId)
       if (!hasPermission) {
         return errorMsg || '权限不足'
       }
 
-      const groupId = session.guildId
-      if (!groupId) {
-        return '请在群聊中使用此命令'
-      }
+      const groupId = effectiveGroupId
+      const userId  = rawUserId   // string | undefined
 
       // 在开始之前检查配置是否为全部拒绝
       const configs = await ctx.database.get('group_verification_config', { groupId })
@@ -1832,23 +1908,62 @@ export function apply(ctx: Context, config: Config) {
 
   // 子命令：拒绝入群申请
   groupVerify
-    .subcommand('.reject [userId]', '拒绝加群申请')
+    .subcommand('.reject', '拒绝加群申请')
     .alias(
       'gv.拒绝', 'gverify.拒绝', 'group-verify.拒绝',
       'gv.rej', 'gverify.rej', 'group-verify.rej',
       'gvr'
     )
-    .action(async ({ session }: any, userId: any) => {
-      // 权限检查
-      const [hasPermission, errorMsg] = await checkPermission(session)
+    .action(async ({ session }: any) => {
+      // ── 参数解析（直接读 session.content，绕过 Koishi 将 '-数字' 当作选项吞掉的问题）──
+      // 格式: gvr [id|all] [group]，最多两段；第一段只能是纯正整数或 all，第二段群号只能是纯数字
+      const parts = (session.content || '').trim().split(/\s+/).slice(1).filter(Boolean)
+      if (parts.length > 2) {
+        return '参数过多，用法: gvr [id|all] [group]'
+      }
+      const rawUserId  = parts[0]   // 可能为 undefined（不传等同于处理最近一条）
+      const rawGroupId = parts[1]   // 可选群号
+
+      // 第一段（若有）只能是纯正整数或 all（不允许负数或非数字字符）
+      if (rawUserId && !/^\d+$/.test(rawUserId) && rawUserId.toLowerCase() !== 'all') {
+        return '参数错误，用法: gvr [id|all] [group]\n第一个参数只能是用户 ID（纯正整数）或 all'
+      }
+
+      // ── 确定目标群号 ──────────────────────────────────────
+      const effectiveGroupId = rawGroupId || session.guildId
+      if (!effectiveGroupId) {
+        return '请在群聊中使用此命令或指定群号: gvr [id|all] [group]'
+      }
+
+      // 群号校验：纯数字为基础要求（不依赖 enableStrictGroupCheck，不允许 all 或含字母）
+      // enableStrictGroupCheck 额外控制长度 5-15 位与在群检查（失败则阻止执行）
+      if (rawGroupId) {
+        if (!/^\d+$/.test(rawGroupId)) {
+          return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', rawGroupId))
+        }
+        if (config?.enableStrictGroupCheck) {
+          if (!/^\d{5,15}$/.test(rawGroupId)) {
+            return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', rawGroupId))
+          }
+          // 严格模式：检查机器人是否在目标群，不在则阻止执行
+          if (session.bot && typeof session.bot.getGuild === 'function') {
+            try {
+              await session.bot.getGuild(rawGroupId)
+            } catch {
+              return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', rawGroupId))
+            }
+          }
+        }
+      }
+
+      // ── 权限检查 ──────────────────────────────────────────
+      const [hasPermission, errorMsg] = await checkPermission(session, effectiveGroupId)
       if (!hasPermission) {
         return errorMsg || '权限不足'
       }
 
-      const groupId = session.guildId
-      if (!groupId) {
-        return '请在群聊中使用此命令'
-      }
+      const groupId = effectiveGroupId
+      const userId  = rawUserId   // string | undefined
 
       // 处理默认情况和 all 情况
       if (!userId || userId.toLowerCase() === 'all') {
@@ -1971,6 +2086,17 @@ export function apply(ctx: Context, config: Config) {
       }
       
       if (isGroupId) {
+        // 严格模式下检查群号长度与机器人是否在群（仅警告不阻止）
+        if (config.enableStrictGroupCheck) {
+          if (!/^\d{5,15}$/.test(target)) {
+            return renderMsg((config.invalidGroupMessage || '群号 {group} 格式不合法或机器人不在该群中').replace('{group}', target))
+          }
+          let sWarn = ''
+          if (session.bot && typeof session.bot.getGuild === 'function') {
+            try { await session.bot.getGuild(target) } catch { sWarn = `⚠️ 机器人可能不在群 ${target} 中\n` }
+          }
+          return sWarn + await getGroupStats(target)
+        }
         // 显示指定群统计
         return await getGroupStats(target)
       }
@@ -2093,16 +2219,21 @@ export function apply(ctx: Context, config: Config) {
     gvb i 12345
 
 快捷命令: 
-  gvc - 配置命令快捷方式
-  gva - 同意申请快捷命令
-  gvr - 拒绝申请快捷命令
-  gvp - 查看待审核列表快捷命令
-  gvs - 查看统计信息快捷命令
+  gvc                     配置命令快捷方式
+  gva [id|all] [group]    同意申请；可指定用户ID/all以及目标群号（私聊必须指定群号）
+  gvr [id|all] [group]    拒绝申请；可指定用户ID/all以及目标群号（私聊必须指定群号）
+  gvp                     查看待审核列表快捷命令
+  gvs                     查看统计信息快捷命令
+
+参数说明(gva/gvr):
+  第一个参数: 用户 ID（纯数字）或 all（处理所有待审核），不填则处理最近一条
+  第二个参数: 目标群号（可选）；不填时使用当前群；私聊必须手动填写
+  群号格式校验受 enableStrictGroupCheck 配置控制
 
 权限说明: 
   - 群主/管理员权限
   - koishi三级以上权限
-  - 私聊时必须指定群号(-i参数)`
+  - 私聊时必须指定群号(-i参数或gva/gvr第二参数)`
     })
 
   // 插件初始化时确保总计统计行存在
